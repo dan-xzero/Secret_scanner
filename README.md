@@ -67,7 +67,7 @@ Domain Input → URL Discovery → Content Fetching → Secret Scanning → Vali
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/automated-secrets-scanner.git
+git clone https://github.com/dan-xzero/automated-secrets-scanner.git
 cd automated-secrets-scanner
 
 # Run automated installer
@@ -634,7 +634,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Documentation**: See `docs/` directory for detailed guides
 - **Issues**: [GitHub Issues](https://github.com/yourusername/automated-secrets-scanner/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/yourusername/automated-secrets-scanner/discussions)
-- **Security**: Report vulnerabilities to security@yourcompany.com
+- **Security**: Report vulnerabilities to danxzero
 
 ---
 
