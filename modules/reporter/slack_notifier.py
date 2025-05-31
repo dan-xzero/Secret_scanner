@@ -632,7 +632,7 @@ class SlackNotifier:
                 "fields": [
                     {"type": "mrkdwn", "text": f"*Duration:*\n{summary_data.get('duration', 'N/A')}"},
                     {"type": "mrkdwn", "text": f"*URLs Scanned:*\n{summary_data.get('urls_scanned', 0)}"},
-                    {"type": "mrkdwn", "text": f"*Total Secrets:*\n{summary_data.get('total_unique_secrets', 0)}"},  # Changed label
+                    {"type": "mrkdwn", "text": f"*Total New Unique Secrets:*\n{analysis['total_new']}"},  # Changed label
                     {"type": "mrkdwn", "text": f"*Verified Active:*\n{summary_data.get('verified_active', 0)}"}
                 ]
             })
@@ -955,7 +955,7 @@ class SlackNotifier:
             "fields": [
                 {"type": "mrkdwn", "text": f"*Duration:*\n{summary_data.get('duration', 'N/A')}"},
                 {"type": "mrkdwn", "text": f"*URLs Scanned:*\n{summary_data.get('urls_scanned', 0)}"},
-                {"type": "mrkdwn", "text": f"*Unique Secrets:*\n{summary_data.get('total_unique_secrets', 0)}"},
+                {"type": "mrkdwn", "text": f"*New Secrets:*\n{summary_data.get('total_unique_secrets', 0)}"},
                 {"type": "mrkdwn", "text": f"*Verified Active:*\n{summary_data.get('verified_active', 0)}"}
             ]
         })
