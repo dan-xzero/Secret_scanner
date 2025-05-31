@@ -147,12 +147,17 @@ class SlackNotifier:
         
         # Analyze findings
         analysis = self._analyze_findings_improved(findings)
+    
+        # If summary_data is provided and has total_unique_secrets, use that for consistency
+        if summary_data and 'total_unique_secrets' in summary_data:
+            analysis['total_unique'] = summary_data['total_unique_secrets']
         
         # Build message blocks
         blocks = []
         
         # Header with unique and new count
         if notification_type == 'new' or analysis['total_new'] > 0:
+            # Use the correct total from analysis
             header_text = f"🆕 {analysis['total_new']} New Secrets Detected ({analysis['total_unique']} Unique Total)"
         else:
             header_text = f"🔍 {analysis['total_unique']} Unique Secrets Detected"
@@ -385,8 +390,18 @@ class SlackNotifier:
             'total_new': 0,
             'total_secrets': len(findings),
             'total_verified': 0,
-            'total_active': 0
+            'total_active': 0,
+            'global_unique_secrets': set()  # Track ALL unique secrets globally
         }
+        
+        # First pass: collect all unique secrets globally
+        for finding in findings:
+            secret_value = finding.get('raw', finding.get('secret', ''))
+            if secret_value:
+                analysis['global_unique_secrets'].add(secret_value)
+        
+        # Set the correct total unique count
+        analysis['total_unique'] = len(analysis['global_unique_secrets'])
         
         # Process each finding
         for finding in findings:
@@ -412,19 +427,29 @@ class SlackNotifier:
             
             group = analysis['groups'][group_key]
             
-            # Track unique secrets
+            # Track unique secrets within this group
             if secret_value and secret_value not in group['unique_secrets']:
                 group['unique_secrets'].add(secret_value)
                 group['unique_count'] += 1
-                analysis['by_severity_unique'][severity] += 1
-                analysis['total_unique'] += 1
+                
+                # Only count for severity breakdown if this is the first time we see this secret
+                # across ALL groups (to avoid double counting in severity stats)
+                secret_already_counted = False
+                for other_key, other_group in analysis['groups'].items():
+                    if other_key != group_key and secret_value in other_group.get('unique_secrets', set()):
+                        secret_already_counted = True
+                        break
+                
+                if not secret_already_counted:
+                    analysis['by_severity_unique'][severity] += 1
                 
                 # Track if this unique secret is new
                 baseline_status = finding.get('baseline_status', 'new')  # Default to 'new' if not specified
                 if baseline_status == 'new':
                     group['new_count'] += 1
-                    analysis['by_severity_new'][severity] += 1
-                    analysis['total_new'] += 1
+                    if not secret_already_counted:
+                        analysis['by_severity_new'][severity] += 1
+                        analysis['total_new'] += 1
                 
                 # Track verification status
                 if finding.get('verified') or finding.get('validation_result', {}).get('valid'):
