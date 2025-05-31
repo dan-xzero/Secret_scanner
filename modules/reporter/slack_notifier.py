@@ -805,7 +805,8 @@ class SlackNotifier:
         base_url = self._get_base_url()
         
         if scan_id:
-            return f"{base_url}/reports/{scan_id}"
+            # Use consistent filename format
+            return f"{base_url}/reports/{scan_id}_full_report.html"
         else:
             return f"{base_url}/reports/latest"
     

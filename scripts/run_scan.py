@@ -1060,23 +1060,28 @@ class SecretsScanner:
                 report_path = self.html_reporter.generate_report(
                     all_findings_with_status,
                     report_type='full',
-                    comparison_data=comparison_results
+                    comparison_data=comparison_results,
+                    scan_id=self.scan_id  # Add this line
                 )
                 self.results['html_report'] = str(report_path)
                 logger.info(f"HTML report generated: {report_path}")
                 
                 # Send Slack notifications for NEW findings only
+                # Send Slack notifications for NEW findings only
                 if self.slack_notifier and self.config.get('enable_slack'):
-                    # Prepare summary data with scan_id
+                    # Prepare summary data with scan_id and ensure consistency
                     summary_data = {
                         'scan_id': self.scan_id,
                         'domains_scanned': len(self.results['domains']),
                         'urls_processed': self.results['content_fetched'],
+                        'urls_scanned': self.results['urls_discovered'],  # Add this
                         'new_findings': len(new_findings),
                         'total_findings': len(all_findings_with_status),
                         'new_secrets': len(new_findings),
                         'recurring_secrets': self.results.get('recurring_secrets', 0),
-                        'resolved_secrets': self.results.get('resolved_secrets', 0)
+                        'resolved_secrets': self.results.get('resolved_secrets', 0),
+                        'duration': f"{time.time() - self.start_time:.2f} seconds",  # Add duration
+                        'domain': self.results['domains'][0] if self.results['domains'] else 'Unknown'  # Add domain
                     }
                     
                     if new_findings:

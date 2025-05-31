@@ -44,9 +44,10 @@ class HTMLReportGenerator:
         logger.info(f"Enhanced HTML Report Generator initialized with reports path: {self.reports_path}")
     
     def generate_report(self, findings: List[Dict[str, Any]], 
-                       report_type: str = 'full',
-                       comparison_data: Optional[Dict[str, Any]] = None,
-                       validation_results: Optional[Dict[str, Any]] = None) -> Path:
+                   report_type: str = 'full',
+                   comparison_data: Optional[Dict[str, Any]] = None,
+                   validation_results: Optional[Dict[str, Any]] = None,
+                    scan_id: Optional[str] = None) -> Path:
         """
         Generate HTML report with optional deduplication
         
@@ -55,6 +56,7 @@ class HTMLReportGenerator:
             report_type: Type of report ('full', 'new', 'summary')
             comparison_data: Baseline comparison data
             validation_results: Validation results
+            scan_id: Scan ID to use in filename
             
         Returns:
             Path to generated report
@@ -72,11 +74,15 @@ class HTMLReportGenerator:
                     findings, report_type, comparison_data, validation_results
                 )
             
+            # Add scan_id to report data
+            if scan_id:
+                report_data['scan_id'] = scan_id
+            
             # Generate HTML
             html_content = self._render_html(report_data)
             
-            # Save report
-            report_file = self._save_report(html_content, report_type)
+            # Save report with scan_id
+            report_file = self._save_report(html_content, report_type, scan_id)
             
             # Update statistics
             self.stats['reports_generated'] += 1
@@ -92,6 +98,33 @@ class HTMLReportGenerator:
                 'timestamp': datetime.utcnow().isoformat()
             })
             return None
+
+    def _save_report(self, html_content: str, report_type: str, scan_id: Optional[str] = None) -> Path:
+        """
+        Save HTML report to file
+        
+        Args:
+            html_content: HTML content
+            report_type: Type of report
+            scan_id: Scan ID to use in filename
+            
+        Returns:
+            Path to saved report
+        """
+        if scan_id:
+            # Use scan_id for consistent naming
+            filename = f"{scan_id}_{report_type}_report.html"
+        else:
+            # Fallback to timestamp if no scan_id provided
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            filename = f"secrets_report_{report_type}_{timestamp}.html"
+        
+        report_file = self.reports_path / filename
+        
+        with open(report_file, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        return report_file
     
     def _deduplicate_findings(self, findings: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
@@ -729,26 +762,6 @@ class HTMLReportGenerator:
                     report_data[f'{chart_name}_colors'] = json.dumps([item.get('color', '#3498db') for item in charts[chart_name]])
         
         return template.render(**report_data)
-    
-    def _save_report(self, html_content: str, report_type: str) -> Path:
-        """
-        Save HTML report to file
-        
-        Args:
-            html_content: HTML content
-            report_type: Type of report
-            
-        Returns:
-            Path to saved report
-        """
-        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        filename = f"secrets_report_{report_type}_{timestamp}.html"
-        report_file = self.reports_path / filename
-        
-        with open(report_file, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        return report_file
     
     def _get_enhanced_html_template(self) -> str:
         """
