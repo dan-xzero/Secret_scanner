@@ -903,8 +903,69 @@ class SlackNotifier:
         Returns:
             True if successful
         """
-        # Use the improved summary message format
-        return self.send_findings_notification([], 'summary', summary_data)
+        # Build a proper completion message that uses the summary data directly
+        blocks = []
+        
+        # Header
+        blocks.append({
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"✅ Secret Scan Completed",
+                "emoji": True
+            }
+        })
+        
+        # Scan info
+        scan_id = scan_id or summary_data.get('scan_id', 'N/A')
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Scan ID:* `{scan_id}`"
+            }
+        })
+        
+        # Key metrics
+        blocks.append({
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Duration:*\n{summary_data.get('duration', 'N/A')}"},
+                {"type": "mrkdwn", "text": f"*URLs Scanned:*\n{summary_data.get('urls_scanned', 0)}"},
+                {"type": "mrkdwn", "text": f"*Unique Secrets:*\n{summary_data.get('total_unique_secrets', 0)}"},
+                {"type": "mrkdwn", "text": f"*Verified Active:*\n{summary_data.get('verified_active', 0)}"}
+            ]
+        })
+        
+        # Report link
+        report_url = self._get_report_url(scan_id)
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"📊 <{report_url}|View Full Report>"
+            }
+        })
+        
+        # Footer
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": f"Completed at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            }]
+        })
+        
+        message = {
+            "channel": self.channel,
+            "username": self.username,
+            "icon_emoji": ":white_check_mark:",
+            "blocks": blocks,
+            "text": f"Scan completed: {summary_data.get('total_unique_secrets', 0)} unique secrets found"
+        }
+        
+        return self._send_slack_message(message)
     
     def send_scan_failed(self, error: str, scan_id: str = None, stage: str = None) -> bool:
         """
