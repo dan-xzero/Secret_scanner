@@ -976,17 +976,66 @@ class SecretsScanner:
             # Process findings to ensure proper structure
             processed_findings = []
             for finding in current_findings:
-                # ... (existing processing code) ...
+                # Get the URL from scanner metadata if available
+                url = None
+                if 'metadata' in finding and 'url' in finding['metadata']:
+                    url = finding['metadata']['url']
+                elif 'source_metadata' in finding and 'url' in finding['source_metadata']:
+                    url = finding['source_metadata']['url']
+                elif 'SourceMetadata' in finding and 'Data' in finding['SourceMetadata']:
+                    # TruffleHog format
+                    if 'URL' in finding['SourceMetadata']['Data']:
+                        url = finding['SourceMetadata']['Data']['URL']
+                    elif 'url' in finding['SourceMetadata']['Data']:
+                        url = finding['SourceMetadata']['Data']['url']
+                
+                # If no URL found, try to construct from file path
+                if not url and 'file' in finding:
+                    # Try to extract domain from file path
+                    file_path = finding['file']
+                    if 'content/' in file_path and '/' in file_path:
+                        parts = file_path.split('/')
+                        if len(parts) > 3:
+                            domain = None
+                            for i, part in enumerate(parts):
+                                if part == 'content' and i + 2 < len(parts):
+                                    domain = parts[i + 2]
+                                    break
+                            if domain:
+                                remaining_path = '/'.join(parts[parts.index(domain) + 1:])
+                                url = f"https://{domain}/{remaining_path}"
+                
+                # Create processed finding with consistent structure
+                processed_finding = {
+                    'id': finding.get('id', hashlib.sha256(f"{finding.get('type')}:{finding.get('file')}:{finding.get('line')}".encode()).hexdigest()[:16]),
+                    'type': finding.get('type', 'unknown'),
+                    'severity': finding.get('severity', 'medium'),
+                    'file_path': finding.get('file', finding.get('file_path', 'unknown')),
+                    'url': url or finding.get('url', ''),
+                    'line_number': finding.get('line', finding.get('line_number')),
+                    'confidence': finding.get('confidence', 'medium'),
+                    'tool': finding.get('detector', finding.get('tool', 'unknown')),
+                    'secret': finding.get('raw', finding.get('secret', '')),
+                    'secret_display': finding.get('raw', finding.get('secret', '')),
+                    'verified': finding.get('verified', False),
+                    'validation_result': finding.get('validation_result', {}),
+                    'validation_status': self._get_validation_status(finding.get('validation_result', {}))
+                }
+                
+                # Add any additional metadata
+                if 'metadata' in finding:
+                    processed_finding['metadata'] = finding['metadata']
+                
                 processed_findings.append(processed_finding)
             
-            # Load baseline for the domain
+            # Load baseline for the domain (use first domain if multiple)
             domain = self.results['domains'][0] if self.results['domains'] else None
             baseline_manager.load_baseline(domain)
             
             # Compare findings with baseline
             comparison_results = baseline_manager.compare_findings(processed_findings)
             
-            # Process comparison results
+            # Process comparison results - mark ALL findings with their status
             all_findings_with_status = []
             new_findings = []
             
@@ -1001,19 +1050,24 @@ class SecretsScanner:
                 finding['baseline_status'] = 'recurring'
                 all_findings_with_status.append(finding)
             
-            # Update results with actual counts
+            # Add false positives (optional - you might want to exclude these from reports)
+            for finding in comparison_results.get('false_positives', []):
+                finding['baseline_status'] = 'false_positive'
+                # Optionally include in report: all_findings_with_status.append(finding)
+            
+            # Update results
             self.results['new_secrets'] = len(new_findings)
             self.results['recurring_secrets'] = len(comparison_results.get('recurring', []))
             self.results['resolved_secrets'] = len(comparison_results.get('resolved', []))
-            self.results['total_unique_secrets'] = len(all_findings_with_status)  # Add this
-            self.results['total_findings'] = len(current_findings)  # Add this
+            self.results['total_unique_secrets'] = len(all_findings_with_status)
+            self.results['total_findings'] = len(current_findings)
             
             logger.info(f"Baseline comparison: {self.results['new_secrets']} new, "
                     f"{self.results['recurring_secrets']} recurring, "
                     f"{self.results['resolved_secrets']} resolved")
             
             if not self.config.get('dry_run'):
-                # Generate HTML report with scan_id
+                # Generate HTML report with ALL findings (showing their status)
                 report_path = self.html_reporter.generate_report(
                     all_findings_with_status,
                     report_type='full',
@@ -1023,9 +1077,9 @@ class SecretsScanner:
                 self.results['html_report'] = str(report_path)
                 logger.info(f"HTML report generated: {report_path}")
                 
-                # Send Slack notifications
+                # Send Slack notifications for NEW findings only
                 if self.slack_notifier and self.config.get('enable_slack'):
-                    # Prepare complete summary data
+                    # Prepare summary data with scan_id
                     summary_data = {
                         'scan_id': self.scan_id,
                         'domains_scanned': len(self.results['domains']),
@@ -1035,7 +1089,7 @@ class SecretsScanner:
                         'duration': f"{time.time() - self.start_time:.2f} seconds",
                         'new_findings': len(new_findings),
                         'total_findings': len(all_findings_with_status),
-                        'total_unique_secrets': len(all_findings_with_status),  # Pass unique count
+                        'total_unique_secrets': len(all_findings_with_status),
                         'new_secrets': len(new_findings),
                         'recurring_secrets': self.results.get('recurring_secrets', 0),
                         'resolved_secrets': self.results.get('resolved_secrets', 0),
@@ -1045,7 +1099,7 @@ class SecretsScanner:
                     if new_findings:
                         logger.warning(f"Found {len(new_findings)} new secrets!")
                         
-                        # Send findings notification for new secrets only
+                        # Send findings notification for new secrets only with summary data
                         self.slack_notifier.send_findings_notification(
                             new_findings,
                             notification_type='new',
@@ -1095,7 +1149,7 @@ class SecretsScanner:
                 'timestamp': datetime.now().isoformat()
             })
             # Don't raise - reporting failures shouldn't fail the scan
-    
+        
     def _redact_secret(self, secret: str) -> str:
         """Redact a secret for safe display."""
         if not secret:
