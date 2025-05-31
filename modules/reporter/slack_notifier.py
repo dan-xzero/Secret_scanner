@@ -157,10 +157,9 @@ class SlackNotifier:
         
         # Header with unique and new count
         if notification_type == 'new' or analysis['total_new'] > 0:
-            # Use the correct total from analysis
-            header_text = f"🆕 {analysis['total_new']} New Secrets Detected ({analysis['total_unique']} Unique Total)"
+            header_text = f"🆕 {analysis['total_new']} New Secrets Detected ({analysis['total_unique']} Total)"
         else:
-            header_text = f"🔍 {analysis['total_unique']} Unique Secrets Detected"
+            header_text = f"🔍 {analysis['total_unique']} Secrets Detected"
         
         blocks.append({
             "type": "header",
@@ -216,14 +215,13 @@ class SlackNotifier:
         })
         
         # Add summary metrics
-        summary_text = f"*Total Secrets Found:* {analysis['total_secrets']}\n"
-        summary_text += f"*Unique Secrets Found:* {analysis['total_unique']}\n"
+        summary_text = f"*Total Secrets Found:* {analysis['total_unique']}\n"
         summary_text += f"*New Secrets:* {analysis['total_new']}\n"
         if summary_data:
             summary_text += f"*URLs Scanned:* {summary_data.get('urls_scanned', 'N/A')}\n"
             if 'duration' in summary_data:
                 summary_text += f"*Scan Duration:* {summary_data.get('duration', 'N/A')}"
-        
+
         blocks.append({
             "type": "section",
             "text": {
@@ -388,7 +386,7 @@ class SlackNotifier:
             'by_severity_new': defaultdict(int),
             'total_unique': 0,
             'total_new': 0,
-            'total_secrets': len(findings),
+            # 'total_secrets': len(findings),
             'total_verified': 0,
             'total_active': 0,
             'global_unique_secrets': set()  # Track ALL unique secrets globally
@@ -634,8 +632,8 @@ class SlackNotifier:
                 "fields": [
                     {"type": "mrkdwn", "text": f"*Duration:*\n{summary_data.get('duration', 'N/A')}"},
                     {"type": "mrkdwn", "text": f"*URLs Scanned:*\n{summary_data.get('urls_scanned', 0)}"},
-                    {"type": "mrkdwn", "text": f"*Unique Secrets:*\n{analysis['total_unique']}"},
-                    {"type": "mrkdwn", "text": f"*Verified Active:*\n{analysis['total_active']}"}
+                    {"type": "mrkdwn", "text": f"*Total Secrets:*\n{summary_data.get('total_unique_secrets', 0)}"},  # Changed label
+                    {"type": "mrkdwn", "text": f"*Verified Active:*\n{summary_data.get('verified_active', 0)}"}
                 ]
             })
         
