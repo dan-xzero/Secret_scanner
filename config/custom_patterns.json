@@ -1,0 +1,207 @@
+{
+  "generic_api_key": {
+    "pattern": "(?i)(?:api[_\\-\\s]?key|apikey)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{32,64})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "generic_secret": {
+    "pattern": "(?i)(?:secret|password|passwd|pwd)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-!@#$%^&*]{8,64})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "bearer_token": {
+    "pattern": "(?i)bearer\\s+([a-zA-Z0-9_\\-\\.]+)",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "postgres_connection": {
+    "pattern": "postgres(?:ql)?:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?\\/[a-zA-Z0-9_\\-]+",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "mysql_connection": {
+    "pattern": "mysql:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?\\/[a-zA-Z0-9_\\-]+",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "mongodb_connection": {
+    "pattern": "mongodb(?:\\+srv)?:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-,:]+(\\/[a-zA-Z0-9_\\-]+)?",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "azure_storage_key": {
+    "pattern": "(?i)(?:AccountKey|azure[_\\-]?storage[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9+\\/]{86}==)[\"']?",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "gcp_service_account": {
+    "pattern": "\"type\"\\s*:\\s*\"service_account\"[^}]*\"private_key\"\\s*:\\s*\"(-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[^\"+]+-----END (?:RSA |EC )?PRIVATE KEY-----)",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "digitalocean_token": {
+    "pattern": "(?i)(?:digitalocean|do)[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{64})[\"']?",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "discord_webhook": {
+    "pattern": "https:\\/\\/discord(?:app)?\\.com\\/api\\/webhooks\\/[0-9]{17,19}\\/[a-zA-Z0-9_\\-]{68}",
+    "confidence": "high",
+    "severity": "medium"
+  },
+  "telegram_bot_token": {
+    "pattern": "(?i)(?:telegram|bot)[_\\-]?token\\s*[:=]\\s*[\"']?([0-9]{8,10}:[a-zA-Z0-9_\\-]{35})[\"']?",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "teams_webhook": {
+    "pattern": "https:\\/\\/outlook\\.office\\.com\\/webhook\\/[a-f0-9\\-]+@[a-f0-9\\-]+\\/IncomingWebhook\\/[a-f0-9]{32}\\/[a-f0-9\\-]+",
+    "confidence": "high",
+    "severity": "medium"
+  },
+  "paypal_token": {
+    "pattern": "(?i)paypal[_\\-]?(?:token|access[_\\-]?token)\\s*[:=]\\s*[\"']?([a-zA-Z0-9\\-_]{20,})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "square_token": {
+    "pattern": "(?i)square[_\\-]?(?:token|access[_\\-]?token)\\s*[:=]\\s*[\"']?(sq0[a-z]{3}-[a-zA-Z0-9\\-_]{22,})[\"']?",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "auth0_token": {
+    "pattern": "(?i)auth0[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-\\.]{40,})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "okta_token": {
+    "pattern": "(?i)okta[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{40,})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "jenkins_token": {
+    "pattern": "(?i)jenkins[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{32,34})[\"']?",
+    "confidence": "medium",
+    "severity": "medium"
+  },
+  "circleci_token": {
+    "pattern": "(?i)circleci[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{40})[\"']?",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "travis_token": {
+    "pattern": "(?i)travis[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?",
+    "confidence": "medium",
+    "severity": "medium"
+  },
+  "datadog_api_key": {
+    "pattern": "(?i)datadog[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-f0-9]{32})[\"']?",
+    "confidence": "high",
+    "severity": "medium"
+  },
+  "newrelic_key": {
+    "pattern": "(?i)new[_\\-]?relic[_\\-]?(?:api[_\\-]?key|license[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9]{40,})[\"']?",
+    "confidence": "medium",
+    "severity": "medium"
+  },
+  "sentry_dsn": {
+    "pattern": "https:\\/\\/[a-f0-9]{32}@(?:o[0-9]+\\.)?(?:sentry\\.io|[a-zA-Z0-9\\.\\-]+)\\/[0-9]+",
+    "confidence": "high",
+    "severity": "medium"
+  },
+  "cloudflare_api_key": {
+    "pattern": "(?i)cloudflare[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-f0-9]{37})[\"']?",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "fastly_api_key": {
+    "pattern": "(?i)fastly[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{32})[\"']?",
+    "confidence": "medium",
+    "severity": "medium"
+  },
+  "ethereum_private_key": {
+    "pattern": "(?i)(?:eth|ethereum)[_\\-]?(?:private[_\\-]?key|priv[_\\-]?key)\\s*[:=]\\s*[\"']?(?:0x)?([a-fA-F0-9]{64})[\"']?",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "bitcoin_private_key": {
+    "pattern": "(?i)(?:btc|bitcoin)[_\\-]?(?:private[_\\-]?key|priv[_\\-]?key)\\s*[:=]\\s*[\"']?([5KL][1-9A-HJ-NP-Za-km-z]{50,51})[\"']?",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "high_entropy_string": {
+    "pattern": "(?i)(?:key|token|secret|password)\\s*[:=]\\s*[\"']?([a-zA-Z0-9+\\/=_\\-]{40,})[\"']?",
+    "confidence": "low",
+    "severity": "medium"
+  },
+  "base64_credentials": {
+    "pattern": "(?i)(?:auth|credentials|authorization)\\s*[:=]\\s*[\"']?(?:basic\\s+)?([a-zA-Z0-9+\\/]{20,}={0,2})[\"']?",
+    "confidence": "low",
+    "severity": "medium"
+  },
+  "env_secret_assignment": {
+    "pattern": "(?:export\\s+)?([A-Z_]{3,}(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD))\\s*=\\s*[\"']?([a-zA-Z0-9_\\-!@#$%^&*]{8,})[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "url_basic_auth": {
+    "pattern": "(?i)https?:\\/\\/([a-zA-Z0-9_\\-]+):([a-zA-Z0-9_\\-!@#$%^&*]+)@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "ssh_dsa_private": {
+    "pattern": "-----BEGIN DSA PRIVATE KEY-----[\\s\\S]+?-----END DSA PRIVATE KEY-----",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "ssh_ecdsa_private": {
+    "pattern": "-----BEGIN EC PRIVATE KEY-----[\\s\\S]+?-----END EC PRIVATE KEY-----",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "pgp_private_key": {
+    "pattern": "-----BEGIN PGP PRIVATE KEY BLOCK-----[\\s\\S]+?-----END PGP PRIVATE KEY BLOCK-----",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "pkcs8_private_key": {
+    "pattern": "-----BEGIN ENCRYPTED PRIVATE KEY-----[\\s\\S]+?-----END ENCRYPTED PRIVATE KEY-----",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "internal_api_endpoint": {
+    "pattern": "(?i)(?:internal|private)[_\\-]?api[_\\-]?(?:endpoint|url)\\s*[:=]\\s*[\"']?(https?:\\/\\/[^\"']+\\?(?:api[_\\-]?key|token)=[a-zA-Z0-9_\\-]+)[\"']?",
+    "confidence": "medium",
+    "severity": "high"
+  },
+  "aws_access_key": {
+    "pattern": "(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "github_token": {
+    "pattern": "(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36}",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "google_api_key": {
+    "pattern": "AIza[0-9A-Za-z\\-_]{35}",
+    "confidence": "high",
+    "severity": "high"
+  },
+  "slack_webhook": {
+    "pattern": "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}",
+    "confidence": "high",
+    "severity": "medium"
+  },
+  "stripe_key": {
+    "pattern": "(?:sk|pk)_(?:test|live)_[a-zA-Z0-9]{24,}",
+    "confidence": "high",
+    "severity": "critical"
+  },
+  "jwt_token": {
+    "pattern": "eyJ[a-zA-Z0-9_-]+\\.eyJ[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+",
+    "confidence": "high",
+    "severity": "high"
+  }
+}

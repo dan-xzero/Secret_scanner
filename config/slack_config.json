@@ -1,0 +1,71 @@
+{
+  "webhook_url": "${SLACK_WEBHOOK_URL}",
+  "channel": "#security-alerts",
+  "username": "Secret Scanner Bot",
+  "icon_emoji": ":lock:",
+  "mention_users": [],
+  "mention_on_critical": true,
+  "rate_limit_delay": 1,
+  "max_findings_per_message": 10,
+  "report_base_url": "http://your-scanner-dashboard.com",
+  "incident_response_url": "https://your-incident-response.com",
+  
+  "formatting": {
+    "show_unique_counts_only": true,
+    "group_by_type_and_severity": true,
+    "max_urls_per_finding": 3,
+    "truncate_long_urls": true,
+    "url_max_length": 60,
+    "severity_grid_format": true,
+    "include_verification_status": true,
+    "clean_secret_type_names": true
+  },
+  
+  "summary_settings": {
+    "show_severity_breakdown": true,
+    "show_top_findings": 3,
+    "include_scan_metadata": true,
+    "unique_counts_prominent": true
+  },
+  
+  "severity_settings": {
+    "critical": {
+      "emoji": "🔴",
+      "priority": 4,
+      "always_notify": true,
+      "mention_required": true
+    },
+    "high": {
+      "emoji": "🟠", 
+      "priority": 3,
+      "always_notify": true,
+      "mention_required": false
+    },
+    "medium": {
+      "emoji": "🟡",
+      "priority": 2,
+      "always_notify": false,
+      "mention_required": false
+    },
+    "low": {
+      "emoji": "🔵",
+      "priority": 1,
+      "always_notify": false,
+      "mention_required": false
+    }
+  },
+  
+  "status_icons": {
+    "active_verified": "✅",
+    "invalid_inactive": "❌",
+    "not_verified": "⚠️",
+    "unknown": "❓"
+  },
+  
+  "notification_filters": {
+    "minimum_severity": "low",
+    "unique_findings_only": true,
+    "exclude_test_domains": true,
+    "test_domain_patterns": ["test", "demo", "example", "localhost"]
+  }
+}

@@ -1,0 +1,117 @@
+www.wayfair.com
+secure.wayfair.com
+partner.wayfair.com
+
+
+
+# ===================================
+# TARGET DOMAINS FOR SECRET SCANNING
+# ===================================
+#
+# Add one domain per line
+# Comments start with #
+# Subdomains are supported
+# Do not include http:// or https://
+#
+# Format examples:
+#   example.com
+#   subdomain.example.com
+#   another-site.org
+#
+# You can use wildcards:
+#   *.example.com (will include all subdomains)
+#
+# To exclude specific paths, use negative patterns:
+#   !example.com/admin
+#   !example.com/wp-admin
+#
+# ===================================
+
+# Production Domains
+
+# Development/Test Domains (comment out in production)
+# dev.example.com
+# test.example.com
+# localhost:3000
+
+# Partner/Third-party Domains (if authorized)
+# partner-api.example.org
+# integration.partner.com
+
+# Mobile App Domains
+# mobile-api.example.com
+# m.example.com
+
+# CDN and Static Assets
+# static.example.com
+# cdn.example.com
+# assets.example.com
+
+# Documentation Sites
+# docs.example.com
+# developer.example.com
+
+# Legacy Systems (high risk for exposed secrets)
+# old.example.com
+# legacy-api.example.com
+# v1.example.com
+
+# Microservices
+# auth-service.example.com
+# payment-service.example.com
+# user-service.example.com
+
+# ===================================
+# EXCLUDED PATTERNS
+# ===================================
+# These patterns will be excluded from scanning
+# even if they match domains above
+
+!example.com/wp-admin
+!example.com/admin
+!example.com/.well-known
+!example.com/robots.txt
+!example.com/sitemap.xml
+
+# Exclude large binary files
+!*.pdf
+!*.zip
+!*.tar.gz
+!*.exe
+!*.dmg
+
+# Exclude image files
+!*.jpg
+!*.jpeg
+!*.png
+!*.gif
+!*.svg
+!*.ico
+
+# Exclude media files
+!*.mp4
+!*.mp3
+!*.avi
+!*.mov
+
+# Exclude font files
+!*.woff
+!*.woff2
+!*.ttf
+!*.eot
+!*.otf
+
+# ===================================
+# NOTES
+# ===================================
+# 
+# 1. Ensure you have permission to scan all listed domains
+# 2. Be mindful of rate limits on target servers
+# 3. Consider using staging/dev environments first
+# 4. Update this list regularly as infrastructure changes
+# 5. Use environment-specific domain files for different stages
+#    - domains.dev.txt
+#    - domains.staging.txt
+#    - domains.prod.txt
+#
+# ===================================

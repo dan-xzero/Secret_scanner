@@ -1,0 +1,361 @@
+# ===================================
+# TRUFFLEHOG CONFIGURATION
+# ===================================
+
+# Global Settings
+global:
+  # Logging configuration
+  log_level: info  # debug, info, warn, error
+  log_format: json  # json, text
+  log_file: ./logs/trufflehog.log
+  
+  # Performance settings
+  concurrency: 20
+  timeout: 300s
+  max_depth: 500
+  
+  # Output settings
+  output_format: json
+  raw_output_file: ./data/scans/raw/trufflehog_raw_secrets.json
+  
+  # Verification settings
+  verify_findings: flase
+  only_verified: false
+  
+  # Archive scanning
+  archive_max_size: 250MB
+  archive_max_depth: 5
+  archive_timeout: 180s
+
+# Detectors Configuration
+detectors:
+  # Enable/disable specific detectors
+  enabled:
+    - aws
+    - github
+    - gitlab
+    - slack
+    - stripe
+    - gcp
+    - azure
+    - privatekey
+    - jwt
+    - generic
+    - mailchimp
+    - sendgrid
+    - twilio
+    - shopify
+    - heroku
+    - npm
+    - dockerhub
+    - telegram
+    - discord
+    - facebook
+    - twitter
+    - linkedin
+    - okta
+    - onepassword
+    - lastpass
+    - mongodb
+    - postgresql
+    - mysql
+    - redis
+    - elasticsearch
+    - firebase
+    - googleapi
+    - openai
+    - anthropic
+    - stability
+    - huggingface
+    
+  # Detector-specific configurations
+  detector_configs:
+    aws:
+      validate: true
+      regions:
+        - us-east-1
+        - us-west-2
+        - eu-west-1
+        - ap-southeast-1
+      timeout: 10s
+      
+    github:
+      validate: true
+      include_public_repos: false
+      timeout: 10s
+      
+    generic:
+      entropy_threshold: 4.5
+      min_length: 10
+      max_length: 100
+
+# Custom Detectors
+custom_detectors:
+  - name: internal_api_key
+    keywords:
+      - "INTERNAL_API"
+      - "INT_KEY"
+      - "PRIVATE_TOKEN"
+    regex:
+      api_key: "\b(INTERNAL_API|INT_KEY|PRIVATE_TOKEN)[\\w\\-]*[=:]\\s*['\"]?([a-zA-Z0-9\\-_]{32,64})['\"]?"
+    verify:
+      endpoint: "https://internal-api.example.com/verify"
+      unsafe: true
+      
+  - name: custom_jwt
+    keywords:
+      - "Bearer"
+      - "Authorization"
+      - "JWT"
+    regex:
+      jwt: 'Bearer\s+([A-Za-z0-9\-_]+\.){2}[A-Za-z0-9\-_]+'
+      
+  - name: database_connection_string
+    keywords:
+      - "mongodb://"
+      - "postgresql://"
+      - "mysql://"
+      - "redis://"
+    regex:
+      connection: '(mongodb|postgresql|mysql|redis):\/\/[^:]+:[^@]+@[^\/]+\/\w+'
+      
+  - name: api_endpoint_with_key
+    keywords:
+      - "api_key="
+      - "apikey="
+      - "key="
+      - "token="
+    regex:
+      url_with_key: 'https?:\/\/[^\s]+[?&](api_key|apikey|key|token)=([a-zA-Z0-9\-_]{16,})'
+      
+  - name: private_key_block
+    keywords:
+      - "BEGIN RSA PRIVATE KEY"
+      - "BEGIN PRIVATE KEY"
+      - "BEGIN EC PRIVATE KEY"
+      - "BEGIN OPENSSH PRIVATE KEY"
+    regex:
+      private_key: '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]+?-----END (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+      
+  - name: hardcoded_password
+    keywords:
+      - "password"
+      - "passwd"
+      - "pwd"
+      - "pass"
+    regex:
+      password: "(?i)(password|passwd|pwd|pass)\\s*[=:]\\s*['\"]?([^\\s'\"]{8,})['\"]?"
+      
+  - name: oauth_token
+    keywords:
+      - "oauth"
+      - "access_token"
+      - "refresh_token"
+    regex:
+      token: "(?i)(oauth|access_token|refresh_token)\\s*[=:]\\s*['\"]?([a-zA-Z0-9\\-._~+/]{20,})['\"]?"
+
+# Exclusion Rules
+exclusions:
+  # Path exclusions
+  paths:
+    # - "**/test/**"
+    # - "**/tests/**"
+    # - "**/spec/**"
+    # - "**/__tests__/**"
+    # - "**/node_modules/**"
+    # - "**/vendor/**"
+    # - "**/third_party/**"
+    # - "**/.git/**"
+    # - "**/docs/**"
+    # - "**/examples/**"
+    # - "**/samples/**"
+    
+  # File exclusions
+  files:
+    # - "*.md"
+    # - "*.txt"
+    # - "*.log"
+    # - "LICENSE*"
+    # - "README*"
+    # - "CHANGELOG*"
+    # - "*.min.js"
+    # - "*.min.css"
+    # - "package-lock.json"
+    # - "yarn.lock"
+    
+  # Content exclusions (regex patterns)
+  content:
+    - 'EXAMPLE_'
+    - 'SAMPLE_'
+    - 'DEMO_'
+    - 'TEST_'
+    - 'YOUR_.*_HERE'
+    - 'xxx+' 
+    - '<[A-Z_]+>'
+    - '\$\{[A-Z_]+\}'
+    
+  # Known false positives
+  false_positives:
+    - "1234567890abcdef1234567890abcdef"  # Common example key
+    - "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # Placeholder
+    - "sk_test_[a-zA-Z0-9]{24}"  # Stripe test keys
+    
+  # Allowed strings (previously in allowlist)
+  allowed_strings:
+    - "localhost"
+    - "127.0.0.1"
+    - "example.com"
+    - "test.com"
+    - "foo.bar"
+    
+  # Allowed patterns (previously in allowlist)
+  allowed_patterns:
+    - '^test_'
+    - '_test$'
+    - '^fake_'
+    - '^dummy_'
+
+# Entropy Settings
+entropy:
+  # Enable entropy-based detection
+  enabled: true
+  
+  # Thresholds for different content types
+  thresholds:
+    base64: 4.5
+    hex: 3.5
+    default: 4.0
+    
+  # Character sets for entropy calculation
+  character_sets:
+    - base64
+    - hex
+    - alphanumeric
+    
+  # Minimum string length for entropy calculation
+  min_length: 20
+  
+  # Maximum string length to consider
+  max_length: 100
+
+# Reporting Settings
+reporting:
+  # Include/exclude fields in output
+  include_fields:
+    - detector_name
+    - detector_type
+    - verified
+    - raw
+    - redacted
+    - source_metadata
+    - extra_data
+    
+  # Redaction settings
+  redaction:
+    enabled: true
+    show_first: 4
+    show_last: 4
+    replacement: "***"
+    
+  # Deduplication
+  deduplicate: true
+  
+  # Grouping
+  group_by: detector_type
+
+# Error Handling
+error_handling:
+  # Continue on errors
+  continue_on_error: true
+  
+  # Max errors before stopping
+  max_errors: 100
+  
+  # Error log file
+  error_log: ./logs/trufflehog_errors.log
+  
+  # Retry settings
+  retry_count: 3
+  retry_delay: 5s
+  
+  # Timeout handling
+  skip_on_timeout: true
+  log_timeouts: true
+
+# Performance Optimization
+performance:
+  # Memory limits
+  max_memory: 2GB
+  
+  # CPU limits
+  max_cpu_percent: 80
+  
+  # Chunk size for large files
+  chunk_size: 1MB
+  
+  # Buffer size
+  buffer_size: 64KB
+  
+  # Caching
+  enable_cache: true
+  cache_size: 500MB
+  cache_ttl: 3600s
+
+# Network Settings
+network:
+  # Proxy configuration
+  proxy:
+    enabled: false
+    http_proxy: ""
+    https_proxy: ""
+    no_proxy: "localhost,127.0.0.1"
+    
+  # SSL/TLS settings
+  tls:
+    skip_verify: false
+    min_version: "1.2"
+    
+  # Timeouts
+  dial_timeout: 10s
+  read_timeout: 30s
+  write_timeout: 30s
+
+# Integration Settings
+integrations:
+  # Webhook for real-time alerts
+  webhook:
+    enabled: false
+    url: ""
+    headers:
+      Content-Type: "application/json"
+    retry_on_failure: true
+    
+  # Jira integration
+  jira:
+    enabled: false
+    url: ""
+    project_key: ""
+    issue_type: "Security"
+    
+  # GitHub integration
+  github:
+    enabled: false
+    repo: ""
+    create_issues: false
+    add_comments: true
+
+# Debug Settings
+debug:
+  # Enable debug mode
+  enabled: false
+  
+  # Save intermediate files
+  save_raw_content: false
+  save_chunks: false
+  
+  # Verbose logging
+  verbose: false
+  
+  # Profiling
+  enable_profiling: false
+  profile_output: ./logs/trufflehog.prof

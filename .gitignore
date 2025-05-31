@@ -1,0 +1,305 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environments
+venv/
+ENV/
+env/
+.venv/
+.virtualenv/
+virtualenv/
+/patterns/secrets-patterns-db
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+.npm
+.yarn-integrity
+.cache
+.parcel-cache
+.next
+out
+.nuxt
+dist
+.cache/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
+.vscode-test
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Data and Scan Results
+data/urls/*
+data/content/*
+data/scans/*
+data/baselines/*
+data/reports/*
+data/screenshots/*
+data/har/*
+!data/urls/.gitkeep
+!data/content/.gitkeep
+!data/scans/.gitkeep
+!data/baselines/.gitkeep
+!data/reports/.gitkeep
+!data/screenshots/.gitkeep
+!data/har/.gitkeep
+data/
+# Raw Secrets (IMPORTANT - Never commit these!)
+raw_secrets.json
+raw_secrets.txt
+validated_secrets.json
+validated_secrets.txt
+*.secrets
+*_secrets.*
+secrets_baseline.json
+baseline_secrets.json
+
+# Database Files
+*.db
+*.sqlite
+*.sqlite3
+baseline.db
+
+# Reports (sensitive data)
+*.html
+!templates/*.html
+secret_scan_report_*
+security_report_*
+
+# Temporary Files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Test Coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+coverage/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Backup Files
+*.backup
+*.old
+*.orig
+*.bkp
+*.bak
+
+# Compressed Files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# SSL Certificates
+*.pem
+*.key
+*.crt
+*.csr
+
+# Secrets and Credentials
+*.pem
+*.key
+private_key*
+id_rsa*
+id_dsa*
+*.pfx
+*.p12
+
+# Configuration with Secrets
+config/slack_config_prod.json
+config/domains_internal.txt
+trufflehog_config_prod.yaml
+gitleaks_prod.toml
+
+# Cache
+.cache/
+*.cache
+redis-data/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Monitoring
+grafana-storage/
+prometheus-data/
+
+# Machine Learning Models
+models/*.pkl
+models/*.h5
+models/*.model
+!models/.gitkeep
+
+# HAR Files (may contain sensitive data)
+*.har
+
+# Screenshots
+screenshots/
+*.png
+*.jpg
+*.jpeg
+!docs/images/*
+
+# Lock Files (optional - depends on team preference)
+# package-lock.json
+# yarn.lock
+# Pipfile.lock
+
+# IDE Specific
+.idea/
+.eclipse/
+.project
+.classpath
+*.sublime-project
+*.sublime-workspace
+
+# Output Files
+output/
+results/
+findings/
+storage/
+
+# Terraform (if using for deployment)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Ansible (if using for deployment)
+*.retry
+ansible/inventory/production
+
+# Custom Pattern Files with Sensitive Data
+patterns/*_internal.yaml
+patterns/*_private.yaml
+
+# Crawlee Storage
+storage/
+.crawlee/
+
+# Playwright Downloads
+playwright-downloads/
+
+# Redis Dump
+dump.rdb
+
+# Session Files
+session_*
+*.session
+
+# API Response Cache
+api_cache/
+
+# Webhook Logs
+webhook_logs/
+
+# Error Dumps
+error_dumps/
+*.stackdump
+core.*
+
+# Performance Profiles
+*.prof
+*.pprof
+
+# Documentation Build
+docs/_build/
+docs/api/
+
+# CI/CD
+.gitlab-ci-local/
+.github/workflows/local/
+
+# Sentry
+.sentryclirc
+
+# Local Development
+local/
+scratch/
+playground/

@@ -1,0 +1,220 @@
+# Custom Patterns for Secret Detection
+# Add your organization-specific patterns here
+
+patterns:
+  - id: generic_api_key
+    name: Generic API Key
+    pattern: "(?i)(?:api[_\\-\\s]?key|apikey)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{32,64})[\"']?"
+    confidence: medium
+    keywords: [api, key, apikey]
+    entropy: 3.5
+
+  - id: generic_secret
+    name: Generic Secret
+    pattern: "(?i)(?:secret|password|passwd|pwd)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-!@#$%^&*]{8,64})[\"']?"
+    confidence: medium
+    keywords: [secret, password, passwd, pwd]
+    entropy: 3.0
+
+  - id: bearer_token
+    name: Bearer Token
+    pattern: "(?i)bearer\\s+([a-zA-Z0-9_\\-\\.]+)"
+    confidence: high
+    keywords: [bearer, authorization]
+
+  - id: postgres_connection
+    name: PostgreSQL Connection String
+    pattern: "postgres(?:ql)?:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?\\/[a-zA-Z0-9_\\-]+"
+    confidence: high
+    keywords: [postgres, postgresql, database]
+
+  - id: mysql_connection
+    name: MySQL Connection String
+    pattern: "mysql:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?\\/[a-zA-Z0-9_\\-]+"
+    confidence: high
+    keywords: [mysql, database]
+
+  - id: mongodb_connection
+    name: MongoDB Connection String
+    pattern: "mongodb(?:\\+srv)?:\\/\\/[a-zA-Z0-9_-]+:[a-zA-Z0-9_\\-!@#$%^&*]+@[a-zA-Z0-9\\.\\-,:]+(\\/[a-zA-Z0-9_\\-]+)?"
+    confidence: high
+    keywords: [mongodb, mongo, database]
+
+  - id: azure_storage_key
+    name: Azure Storage Account Key
+    pattern: "(?i)(?:AccountKey|azure[_\\-]?storage[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9+\\/]{86}==)[\"']?"
+    confidence: high
+    keywords: [azure, storage, accountkey]
+
+  - id: gcp_service_account
+    name: GCP Service Account Key
+    pattern: "\"type\"\\s*:\\s*\"service_account\"[^}]*\"private_key\"\\s*:\\s*\"(-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[^\"+]+-----END (?:RSA |EC )?PRIVATE KEY-----)\""
+    confidence: high
+    keywords: [service_account, private_key, google]
+
+  - id: digitalocean_token
+    name: DigitalOcean Personal Access Token
+    pattern: "(?i)(?:digitalocean|do)[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{64})[\"']?"
+    confidence: high
+    keywords: [digitalocean, token]
+
+  - id: discord_webhook
+    name: Discord Webhook URL
+    pattern: "https:\\/\\/discord(?:app)?\\.com\\/api\\/webhooks\\/[0-9]{17,19}\\/[a-zA-Z0-9_\\-]{68}"
+    confidence: high
+    keywords: [discord, webhook]
+
+  - id: telegram_bot_token
+    name: Telegram Bot Token
+    pattern: "(?i)(?:telegram|bot)[_\\-]?token\\s*[:=]\\s*[\"']?([0-9]{8,10}:[a-zA-Z0-9_\\-]{35})[\"']?"
+    confidence: high
+    keywords: [telegram, bot, token]
+
+  - id: teams_webhook
+    name: Microsoft Teams Webhook
+    pattern: "https:\\/\\/outlook\\.office\\.com\\/webhook\\/[a-f0-9\\-]+@[a-f0-9\\-]+\\/IncomingWebhook\\/[a-f0-9]{32}\\/[a-f0-9\\-]+"
+    confidence: high
+    keywords: [teams, webhook, microsoft]
+
+  - id: paypal_token
+    name: PayPal Access Token
+    pattern: "(?i)paypal[_\\-]?(?:token|access[_\\-]?token)\\s*[:=]\\s*[\"']?([a-zA-Z0-9\\-_]{20,})[\"']?"
+    confidence: medium
+    keywords: [paypal, token]
+
+  - id: square_token
+    name: Square Access Token
+    pattern: "(?i)square[_\\-]?(?:token|access[_\\-]?token)\\s*[:=]\\s*[\"']?(sq0[a-z]{3}-[a-zA-Z0-9\\-_]{22,})[\"']?"
+    confidence: high
+    keywords: [square, token]
+
+  - id: auth0_token
+    name: Auth0 API Token
+    pattern: "(?i)auth0[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-\\.]{40,})[\"']?"
+    confidence: medium
+    keywords: [auth0, token]
+
+  - id: okta_token
+    name: Okta API Token
+    pattern: "(?i)okta[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{40,})[\"']?"
+    confidence: medium
+    keywords: [okta, token]
+
+  - id: jenkins_token
+    name: Jenkins API Token
+    pattern: "(?i)jenkins[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{32,34})[\"']?"
+    confidence: medium
+    keywords: [jenkins, token]
+
+  - id: circleci_token
+    name: CircleCI Personal API Token
+    pattern: "(?i)circleci[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-f0-9]{40})[\"']?"
+    confidence: high
+    keywords: [circleci, token]
+
+  - id: travis_token
+    name: Travis CI API Token
+    pattern: "(?i)travis[_\\-]?(?:token|api[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+    confidence: medium
+    keywords: [travis, token]
+
+  - id: datadog_api_key
+    name: Datadog API Key
+    pattern: "(?i)datadog[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-f0-9]{32})[\"']?"
+    confidence: high
+    keywords: [datadog, api, key]
+
+  - id: newrelic_key
+    name: New Relic API Key
+    pattern: "(?i)new[_\\-]?relic[_\\-]?(?:api[_\\-]?key|license[_\\-]?key)\\s*[:=]\\s*[\"']?([a-zA-Z0-9]{40,})[\"']?"
+    confidence: medium
+    keywords: [newrelic, key]
+
+  - id: sentry_dsn
+    name: Sentry DSN
+    pattern: "https:\\/\\/[a-f0-9]{32}@(?:o[0-9]+\\.)?(?:sentry\\.io|[a-zA-Z0-9\\.\\-]+)\\/[0-9]+"
+    confidence: high
+    keywords: [sentry, dsn]
+
+  - id: cloudflare_api_key
+    name: Cloudflare API Key
+    pattern: "(?i)cloudflare[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-f0-9]{37})[\"']?"
+    confidence: high
+    keywords: [cloudflare, api, key]
+
+  - id: fastly_api_key
+    name: Fastly API Key
+    pattern: "(?i)fastly[_\\-]?api[_\\-]?key\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{32})[\"']?"
+    confidence: medium
+    keywords: [fastly, api, key]
+
+  - id: ethereum_private_key
+    name: Ethereum Private Key
+    pattern: "(?i)(?:eth|ethereum)[_\\-]?(?:private[_\\-]?key|priv[_\\-]?key)\\s*[:=]\\s*[\"']?(?:0x)?([a-fA-F0-9]{64})[\"']?"
+    confidence: high
+    keywords: [ethereum, private, key]
+
+  - id: bitcoin_private_key
+    name: Bitcoin Private Key (WIF)
+    pattern: "(?i)(?:btc|bitcoin)[_\\-]?(?:private[_\\-]?key|priv[_\\-]?key)\\s*[:=]\\s*[\"']?([5KL][1-9A-HJ-NP-Za-km-z]{50,51})[\"']?"
+    confidence: high
+    keywords: [bitcoin, private, key]
+
+  - id: high_entropy_string
+    name: High Entropy String
+    pattern: "(?i)(?:key|token|secret|password)\\s*[:=]\\s*[\"']?([a-zA-Z0-9+\\/=_\\-]{40,})[\"']?"
+    confidence: low
+    keywords: [key, token, secret, password]
+    entropy: 4.5
+
+  - id: base64_credentials
+    name: Base64 Encoded Credentials
+    pattern: "(?i)(?:auth|credentials|authorization)\\s*[:=]\\s*[\"']?(?:basic\\s+)?([a-zA-Z0-9+\\/]{20,}={0,2})[\"']?"
+    confidence: low
+    keywords: [auth, credentials, authorization, basic]
+    entropy: 4.0
+
+  - id: env_secret_assignment
+    name: Environment Variable Secret Assignment
+    pattern: "(?:export\\s+)?([A-Z_]{3,}(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD))\\s*=\\s*[\"']?([a-zA-Z0-9_\\-!@#$%^&*]{8,})[\"']?"
+    confidence: medium
+    keywords: [export, key, token, secret, password]
+
+  - id: url_basic_auth
+    name: URL with Basic Authentication
+    pattern: "(?i)https?:\\/\\/([a-zA-Z0-9_\\-]+):([a-zA-Z0-9_\\-!@#$%^&*]+)@[a-zA-Z0-9\\.\\-]+(?::[0-9]+)?"
+    confidence: high
+    keywords: [http, https, auth]
+
+  - id: ssh_dsa_private
+    name: SSH DSA Private Key
+    pattern: "-----BEGIN DSA PRIVATE KEY-----[\\s\\S]+?-----END DSA PRIVATE KEY-----"
+    confidence: high
+    keywords: [dsa, private, key]
+
+  - id: ssh_ecdsa_private
+    name: SSH ECDSA Private Key
+    pattern: "-----BEGIN EC PRIVATE KEY-----[\\s\\S]+?-----END EC PRIVATE KEY-----"
+    confidence: high
+    keywords: [ecdsa, private, key]
+
+  - id: pgp_private_key
+    name: PGP Private Key Block
+    pattern: "-----BEGIN PGP PRIVATE KEY BLOCK-----[\\s\\S]+?-----END PGP PRIVATE KEY BLOCK-----"
+    confidence: high
+    keywords: [pgp, private, key]
+
+  - id: pkcs8_private_key
+    name: PKCS8 Private Key
+    pattern: "-----BEGIN ENCRYPTED PRIVATE KEY-----[\\s\\S]+?-----END ENCRYPTED PRIVATE KEY-----"
+    confidence: high
+    keywords: [encrypted, private, key]
+
+  - id: internal_api_endpoint
+    name: Internal API Endpoint with Key
+    pattern: "(?i)(?:internal|private)[_\\-]?api[_\\-]?(?:endpoint|url)\\s*[:=]\\s*[\"']?(https?:\\/\\/[^\"']+\\?(?:api[_\\-]?key|token)=[a-zA-Z0-9_\\-]+)[\"']?"
+    confidence: medium
+    keywords: [internal, api, endpoint]
+    verification:
+      type: http_get
+      timeout: 5
