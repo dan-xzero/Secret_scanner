@@ -1121,7 +1121,7 @@ class SecretsScanner:
                         'line': 12,
                         'confidence': 'medium',
                         'severity': 'high',
-                        'raw': 'sk_test_4eC39HqLyjWDarjtT1zdp7dc',
+                        'raw': 'sk_key',
                         'verified': False
                     }
                 ]
