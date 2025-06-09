@@ -1,8 +1,6 @@
-
-#!/usr/bin/env python3
 #!/usr/bin/env python3
 """
-Automated Validator for Secret Scanner
+Automated Validator for Secret Scanner with Database Integration
 Validates discovered secrets by testing them against their respective services
 """
 
@@ -35,22 +33,22 @@ except ImportError:
 
 
 class AutoValidator:
-    """Automated validation of discovered secrets"""
+    """Automated validation of discovered secrets with database integration"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], db_manager=None):
         """
         Initialize Auto Validator
         
         Args:
             config: Configuration dictionary
+            db_manager: DatabaseManager instance
         """
         self.config = config
-        self.validation_results_path = Path(config.get('data_storage_path', './data')) / 'validation'
-        self.validation_results_path.mkdir(parents=True, exist_ok=True)
+        self.db = db_manager
         
         # Validation settings
         self.max_workers = config.get('validation', {}).get('max_workers', 5)
-        self.timeout = config.get('validation', {}).get('timeout', 10000)
+        self.timeout = config.get('validation', {}).get('timeout', 10)
         self.rate_limit_delay = config.get('validation', {}).get('rate_limit_delay', 1)
         
         # Validators for different secret types
@@ -74,6 +72,9 @@ class AutoValidator:
             'generic_api_key': self._validate_generic_api
         }
         
+        # Current scan run ID
+        self.current_scan_run_id = None
+        
         # Statistics
         self.stats = {
             'total_validated': 0,
@@ -86,8 +87,151 @@ class AutoValidator:
         
         logger.info(f"Auto Validator initialized with {len(self.validators)} validators")
     
+    def validate_findings_from_db(self, scan_run_id: int = None, finding_ids: List[int] = None,
+                                 secret_types: List[str] = None, parallel: bool = True) -> Dict[str, Any]:
+        """
+        Load findings from database and validate them
+        
+        Args:
+            scan_run_id: Specific scan run to validate
+            finding_ids: Specific finding IDs to validate
+            secret_types: Filter by secret types
+            parallel: Whether to validate in parallel
+            
+        Returns:
+            Validation summary
+        """
+        if not self.db:
+            logger.error("No database connection available")
+            return {}
+        
+        try:
+            # Load findings from database
+            findings = self._load_findings_from_db(scan_run_id, finding_ids, secret_types)
+            
+            if not findings:
+                logger.info("No findings to validate")
+                return {
+                    'total_findings': 0,
+                    'validated': 0,
+                    'errors': []
+                }
+            
+            logger.info(f"Loaded {len(findings)} findings from database for validation")
+            
+            # Set current scan run ID
+            self.current_scan_run_id = scan_run_id
+            
+            # Validate findings
+            return self.validate_findings(findings, parallel)
+            
+        except Exception as e:
+            logger.error(f"Error validating findings from database: {e}")
+            return {
+                'error': str(e),
+                'total_findings': 0,
+                'validated': 0
+            }
+    
+    def _load_findings_from_db(self, scan_run_id: int = None, finding_ids: List[int] = None,
+                              secret_types: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Load findings from database
+        
+        Args:
+            scan_run_id: Filter by scan run
+            finding_ids: Specific finding IDs
+            secret_types: Filter by secret types
+            
+        Returns:
+            List of findings
+        """
+        findings = []
+        
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Build query
+                query = """
+                    SELECT 
+                        f.id as finding_id,
+                        f.secret_id,
+                        f.url_id,
+                        f.line_number,
+                        f.snippet,
+                        f.file_path,
+                        f.validation_status,
+                        f.validation_result,
+                        s.secret_hash,
+                        s.secret_type,
+                        s.detector_name,
+                        s.severity,
+                        s.confidence,
+                        s.is_verified,
+                        u.url
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    WHERE 1=1
+                """
+                
+                params = []
+                
+                if scan_run_id:
+                    query += " AND f.scan_run_id = ?"
+                    params.append(scan_run_id)
+                
+                if finding_ids:
+                    placeholders = ','.join(['?' for _ in finding_ids])
+                    query += f" AND f.id IN ({placeholders})"
+                    params.extend(finding_ids)
+                
+                if secret_types:
+                    placeholders = ','.join(['?' for _ in secret_types])
+                    query += f" AND s.secret_type IN ({placeholders})"
+                    params.extend(secret_types)
+                
+                # Only get findings that haven't been validated or need re-validation
+                query += " AND (f.validation_status IS NULL OR f.validation_status = 'pending')"
+                
+                cursor.execute(query, params)
+                
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    finding = {
+                        'finding_id': row[0],
+                        'secret_id': row[1],
+                        'url_id': row[2],
+                        'line': row[3],
+                        'context': row[4],
+                        'file_path': row[5],
+                        'validation_status': row[6],
+                        'validation_result': json.loads(row[7]) if row[7] else {},
+                        'secret_hash': row[8],
+                        'type': row[9],
+                        'detector': row[10],
+                        'severity': row[11],
+                        'confidence': row[12],
+                        'verified': row[13],
+                        'url': row[14],
+                        # Note: We don't store the actual secret value in findings
+                        # For validation, we would need to retrieve it from a secure location
+                        # or re-scan the original file
+                        'secret': ''  # Placeholder
+                    }
+                    findings.append(finding)
+                
+                logger.info(f"Loaded {len(findings)} findings from database")
+                
+        except Exception as e:
+            logger.error(f"Error loading findings from database: {e}")
+        
+        return findings
+    
     def validate_findings(self, findings: List[Dict[str, Any]], 
-                         parallel: bool = True) -> List[Dict[str, Any]]:
+                         parallel: bool = True) -> Dict[str, Any]:
         """
         Validate a list of findings
         
@@ -96,7 +240,7 @@ class AutoValidator:
             parallel: Whether to validate in parallel
             
         Returns:
-            List of findings with validation results
+            Validation summary
         """
         try:
             logger.info(f"Starting validation of {len(findings)} findings")
@@ -107,8 +251,8 @@ class AutoValidator:
             else:
                 validated_findings = self._validate_sequential(findings)
             
-            # Save validation results
-            self._save_validation_results(validated_findings)
+            # Update validation results in database
+            self._update_validation_results_in_db(validated_findings)
             
             # Update statistics
             elapsed_time = time.time() - start_time
@@ -117,12 +261,17 @@ class AutoValidator:
                        f"Invalid: {self.stats['invalid_secrets']}, "
                        f"Errors: {len(self.stats['validation_errors'])}")
             
-            return validated_findings
+            # Generate and return summary
+            return self.generate_validation_report(validated_findings)
             
         except Exception as e:
             logger.error(f"Error during validation: {e}")
             logger.exception(e)
-            return findings
+            return {
+                'error': str(e),
+                'total_findings': len(findings),
+                'validated': 0
+            }
     
     def _validate_parallel(self, findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -203,7 +352,20 @@ class AutoValidator:
             secret = finding.get('secret', '')
             
             # Skip if already validated
-            if 'validation_result' in finding:
+            if finding.get('validation_status') == 'completed':
+                return finding
+            
+            # For database-based findings, we need to retrieve the actual secret
+            # This is a placeholder - in production, you'd retrieve from secure storage
+            if not secret and 'secret_hash' in finding:
+                # In a real implementation, you would:
+                # 1. Retrieve the actual secret from secure storage using the hash
+                # 2. Or re-read from the original file using file_path and line number
+                finding['validation_result'] = {
+                    'valid': None,
+                    'reason': 'Secret value not available for validation',
+                    'validated_at': datetime.utcnow().isoformat()
+                }
                 return finding
             
             # Skip if no secret
@@ -272,6 +434,59 @@ class AutoValidator:
                 'timestamp': datetime.utcnow().isoformat()
             })
             return finding
+    
+    def _update_validation_results_in_db(self, validated_findings: List[Dict[str, Any]]) -> None:
+        """
+        Update validation results in database
+        
+        Args:
+            validated_findings: List of validated findings
+        """
+        if not self.db:
+            logger.warning("No database connection available")
+            return
+        
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                for finding in validated_findings:
+                    if 'finding_id' not in finding:
+                        continue
+                    
+                    validation_result = finding.get('validation_result', {})
+                    validation_status = 'completed'
+                    
+                    if 'validation_error' in finding:
+                        validation_status = 'error'
+                        validation_result['error'] = finding['validation_error']
+                    
+                    # Update finding
+                    cursor.execute("""
+                        UPDATE findings
+                        SET validation_status = ?,
+                            validation_result = ?,
+                            validated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (
+                        validation_status,
+                        json.dumps(validation_result),
+                        finding['finding_id']
+                    ))
+                    
+                    # Update secret verification status if validated
+                    if validation_result.get('valid') is True and 'secret_id' in finding:
+                        cursor.execute("""
+                            UPDATE secrets
+                            SET is_verified = 1
+                            WHERE id = ?
+                        """, (finding['secret_id'],))
+                
+                conn.commit()
+                logger.info(f"Updated {len(validated_findings)} validation results in database")
+                
+        except Exception as e:
+            logger.error(f"Error updating validation results in database: {e}")
     
     def _validate_aws_key(self, secret: str, finding: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """
@@ -684,52 +899,6 @@ class AutoValidator:
             logger.error(f"Error in generic validation: {e}")
             return False, {'error': str(e)}
     
-    def _save_validation_results(self, validated_findings: List[Dict[str, Any]]) -> None:
-        """
-        Save validation results to file
-        
-        Args:
-            validated_findings: List of validated findings
-        """
-        try:
-            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            filename = f"validation_results_{timestamp}.json"
-            filepath = self.validation_results_path / filename
-            
-            # Prepare results
-            results = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'statistics': self.stats,
-                'findings': validated_findings
-            }
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, default=str)
-            
-            logger.info(f"Saved validation results to {filepath}")
-            
-        except Exception as e:
-            logger.error(f"Error saving validation results: {e}")
-    
-
-    def validate_secrets(self, secrets_file_path: str) -> List[Dict[str, Any]]:
-        """
-        Load findings from a secrets file and validate them.
-
-        Args:
-            secrets_file_path: Path to raw secrets JSON file
-
-        Returns:
-            List of validated findings
-        """
-        try:
-            with open(secrets_file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            findings = data.get("findings", [])
-            return self.validate_findings(findings)
-        except Exception as e:
-            logger.error(f"Failed to load or validate secrets from {secrets_file_path}: {e}")
-            return []
     def get_statistics(self) -> Dict[str, Any]:
         """
         Get validation statistics
@@ -775,11 +944,150 @@ class AutoValidator:
                         'type': finding.get('type'),
                         'severity': finding.get('severity'),
                         'location': finding.get('file_path') or finding.get('url'),
-                        'validated_at': finding.get('validation_result', {}).get('validated_at')
+                        'validated_at': finding.get('validation_result', {}).get('validated_at'),
+                        'finding_id': finding.get('finding_id')
                     })
+            
+            # Update scan run statistics if we have a scan run ID
+            if self.current_scan_run_id and self.db:
+                self._update_scan_run_validation_stats(report)
             
             return report
             
         except Exception as e:
             logger.error(f"Error generating validation report: {e}")
             return {}
+    
+    def _update_scan_run_validation_stats(self, report: Dict[str, Any]) -> None:
+        """
+        Update scan run with validation statistics
+        
+        Args:
+            report: Validation report
+        """
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    UPDATE scan_runs
+                    SET validation_stats = ?,
+                        validated_secrets_count = ?,
+                        valid_secrets_count = ?
+                    WHERE id = ?
+                """, (
+                    json.dumps(report),
+                    report['summary']['validated'],
+                    report['summary']['valid_secrets'],
+                    self.current_scan_run_id
+                ))
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error updating scan run validation stats: {e}")
+    
+    def validate_specific_secret(self, secret_hash: str) -> Dict[str, Any]:
+        """
+        Validate a specific secret by its hash
+        
+        Args:
+            secret_hash: SHA256 hash of the secret
+            
+        Returns:
+            Validation result
+        """
+        if not self.db:
+            return {'error': 'No database connection'}
+        
+        try:
+            # Get all findings for this secret
+            findings = self._load_findings_for_secret_hash(secret_hash)
+            
+            if not findings:
+                return {
+                    'error': 'No findings for this secret hash',
+                    'secret_hash': secret_hash
+                }
+            
+            # Validate all findings for this secret
+            validated = self.validate_findings(findings, parallel=False)
+            
+            return {
+                'secret_hash': secret_hash,
+                'findings_validated': len(findings),
+                'validation_report': validated
+            }
+            
+        except Exception as e:
+            logger.error(f"Error validating specific secret: {e}")
+            return {
+                'error': str(e),
+                'secret_hash': secret_hash
+            }
+    
+    def _load_findings_for_secret_hash(self, secret_hash: str) -> List[Dict[str, Any]]:
+        """
+        Load all findings for a specific secret hash
+        
+        Args:
+            secret_hash: SHA256 hash of the secret
+            
+        Returns:
+            List of findings
+        """
+        findings = []
+        
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT 
+                        f.id as finding_id,
+                        f.secret_id,
+                        f.url_id,
+                        f.line_number,
+                        f.snippet,
+                        f.file_path,
+                        f.validation_status,
+                        f.validation_result,
+                        s.secret_type,
+                        s.detector_name,
+                        s.severity,
+                        s.confidence,
+                        s.is_verified,
+                        u.url
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    WHERE s.secret_hash = ?
+                """, (secret_hash,))
+                
+                rows = cursor.fetchall()
+                
+                for row in rows:
+                    finding = {
+                        'finding_id': row[0],
+                        'secret_id': row[1],
+                        'url_id': row[2],
+                        'line': row[3],
+                        'context': row[4],
+                        'file_path': row[5],
+                        'validation_status': row[6],
+                        'validation_result': json.loads(row[7]) if row[7] else {},
+                        'type': row[8],
+                        'detector': row[9],
+                        'severity': row[10],
+                        'confidence': row[11],
+                        'verified': row[12],
+                        'url': row[13],
+                        'secret_hash': secret_hash,
+                        'secret': ''  # Placeholder
+                    }
+                    findings.append(finding)
+                
+        except Exception as e:
+            logger.error(f"Error loading findings for secret hash: {e}")
+        
+        return findings

@@ -1,12 +1,13 @@
 """
-Enhanced Static Content Fetcher
+Enhanced Static Content Fetcher with URL-based Filename Support
 
 Key improvements:
-1. Better error handling and retry logic
-2. Smart content type detection
-3. Enhanced JavaScript extraction
-4. Better handling of different response types
-5. Improved performance with connection pooling
+1. URL-based filename support from main scanner
+2. Better error handling and retry logic
+3. Smart content type detection
+4. Enhanced JavaScript extraction
+5. Better handling of different response types
+6. Improved performance with connection pooling
 """
 
 import os
@@ -34,7 +35,7 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
 class StaticFetcher:
-    """Enhanced static content fetcher with fallback capabilities."""
+    """Enhanced static content fetcher with URL-based filename support."""
     
     def __init__(self, config: Dict, logger: Optional[logging.Logger] = None):
         """
@@ -47,8 +48,11 @@ class StaticFetcher:
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
         
+        # URL to filename mapping (set by content fetcher)
+        self.url_filename_map = {}
+        
         # Configuration
-        self.timeout = config.get('timeout', 30000)
+        self.timeout = config.get('timeout', 30000) / 1000  # Convert to seconds
         self.max_retries = config.get('max_retries', 3)
         self.user_agent = config.get('user_agent', 
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
@@ -156,6 +160,25 @@ class StaticFetcher:
             self.logger.info(f"Using proxy: {proxy_url}")
         
         return session
+    
+    def fetch_url_with_filename(self, url: str, output_dir: str, filename: str) -> bool:
+        """
+        Fetch content from a URL using a specific filename.
+        
+        Args:
+            url: URL to fetch
+            output_dir: Directory to save content
+            filename: Specific filename to use
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Temporarily store the filename mapping
+        self.url_filename_map[url] = filename
+        result = self.fetch_url(url, output_dir)
+        # Clean up temporary mapping
+        del self.url_filename_map[url]
+        return result
     
     def fetch_url(self, url: str, output_dir: str) -> bool:
         """
@@ -550,9 +573,19 @@ class StaticFetcher:
                     except:
                         pass
                 
+                # Get base filename for inline scripts
+                if url in self.url_filename_map:
+                    base_filename = Path(self.url_filename_map[url]).stem
+                    script_filename = f"{base_filename}_inline_{script['index']}.js"
+                else:
+                    # Fallback to hash-based name
+                    script_filename = None
+                
                 # Save inline script
                 script_path = self._get_output_path(
-                    url, output_dir, 'inline-scripts', f'_inline_{script["index"]}.js'
+                    url, output_dir, 'inline-scripts', 
+                    f'_inline_{script["index"]}.js',
+                    override_filename=script_filename
                 )
                 script_path.parent.mkdir(parents=True, exist_ok=True)
                 
@@ -627,7 +660,17 @@ class StaticFetcher:
                 'fetcher_version': '2.0'
             })
             
-            metadata_path = self._get_output_path(url, output_dir, 'metadata', '.json')
+            # Get metadata filename
+            if url in self.url_filename_map:
+                base_filename = Path(self.url_filename_map[url]).stem
+                meta_filename = f"{base_filename}_meta.json"
+            else:
+                meta_filename = None
+            
+            metadata_path = self._get_output_path(
+                url, output_dir, 'metadata', '.json',
+                override_filename=meta_filename
+            )
             metadata_path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(metadata_path, 'w') as f:
@@ -647,7 +690,17 @@ class StaticFetcher:
                 'fetcher': 'static'
             }
             
-            error_path = self._get_output_path(url, output_dir, 'errors', '.json')
+            # Get error filename
+            if url in self.url_filename_map:
+                base_filename = Path(self.url_filename_map[url]).stem
+                error_filename = f"{base_filename}_error.json"
+            else:
+                error_filename = None
+            
+            error_path = self._get_output_path(
+                url, output_dir, 'errors', '.json',
+                override_filename=error_filename
+            )
             error_path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(error_path, 'w') as f:
@@ -656,9 +709,26 @@ class StaticFetcher:
         except Exception as e:
             self.logger.debug(f"Failed to save error for {url}: {e}")
     
-    def _get_output_path(self, url: str, output_dir: str, subdir: str, extension: str) -> Path:
-        """Generate output path for a URL."""
-        # Generate hash-based filename
+    def _get_output_path(self, url: str, output_dir: str, subdir: str, 
+                        extension: str, override_filename: Optional[str] = None) -> Path:
+        """Generate output path for a URL using URL-based filename if available."""
+        # Check if we have a URL-based filename
+        if url in self.url_filename_map:
+            filename = self.url_filename_map[url]
+            
+            # Ensure correct extension
+            if not filename.endswith(extension) and extension:
+                # Remove existing extension if any
+                base = filename.rsplit('.', 1)[0]
+                filename = base + extension
+            
+            return Path(output_dir) / subdir / filename
+        
+        # Check for override filename (for inline scripts, metadata, etc.)
+        if override_filename:
+            return Path(output_dir) / subdir / override_filename
+        
+        # Fallback to hash-based filename
         url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
         
         # Try to create meaningful filename

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Enhanced Slack Notifier for Secret Scanner - Improved Version
+Enhanced Slack Notifier for Secret Scanner - Database Integrated Version
 Focuses on unique findings with cleaner, more consistent formatting
 """
 
 import os
 import json
 import time
+import sqlite3
 import requests
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Set, Tuple
@@ -16,17 +17,21 @@ from loguru import logger
 
 
 class SlackNotifier:
-    """Handles Slack notifications for secret findings with improved formatting"""
+    """Handles Slack notifications for secret findings with database integration"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], db_path: Optional[str] = None):
         """
         Initialize Slack Notifier
         
         Args:
             config: Configuration dictionary
+            db_path: Path to database file
         """
         self.config = config
         self.slack_config = self._load_slack_config()
+        
+        # Database path
+        self.db_path = db_path or Path(config.get('data_storage_path', './data')) / 'scanner.db'
         
         # Webhook URL (can be overridden by environment variable)
         self.webhook_url = os.environ.get('SLACK_WEBHOOK_URL') or self.slack_config.get('webhook_url')
@@ -52,10 +57,47 @@ class SlackNotifier:
             'last_notification': None
         }
         
+        # Initialize notification tracking table
+        self._init_notification_tracking()
+        
         if not self.webhook_url:
             logger.warning("No Slack webhook URL configured")
         else:
             logger.info(f"Slack Notifier initialized for channel: {self.channel}")
+    
+    def _init_notification_tracking(self):
+        """Initialize notification tracking table in database"""
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS notification_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scan_run_id INTEGER,
+                        secret_id INTEGER,
+                        notification_type TEXT,
+                        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        status TEXT,
+                        message_id TEXT,
+                        FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id),
+                        FOREIGN KEY (secret_id) REFERENCES secrets(id)
+                    )
+                ''')
+                
+                # Create indexes
+                conn.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_notification_scan_run 
+                    ON notification_history(scan_run_id)
+                ''')
+                conn.execute('''
+                    CREATE INDEX IF NOT EXISTS idx_notification_secret 
+                    ON notification_history(secret_id)
+                ''')
+                
+                conn.commit()
+                logger.debug("Notification tracking table initialized")
+                
+        except Exception as e:
+            logger.error(f"Error initializing notification tracking: {e}")
     
     def _load_slack_config(self) -> Dict[str, Any]:
         """Load Slack configuration"""
@@ -72,6 +114,318 @@ class SlackNotifier:
         except Exception as e:
             logger.error(f"Error loading Slack config: {e}")
             return {}
+    
+    def send_findings_notification_from_db(self, scan_run_id: int, 
+                                         notification_type: str = 'new') -> bool:
+        """
+        Send notification for findings from database
+        
+        Args:
+            scan_run_id: Scan run ID
+            notification_type: Type of notification ('new', 'summary', 'critical')
+            
+        Returns:
+            True if successful
+        """
+        try:
+            if not self.webhook_url:
+                logger.warning("Cannot send notification: No webhook URL configured")
+                return False
+            
+            # Get findings from database
+            findings = self._get_findings_from_db(scan_run_id, notification_type)
+            summary_data = self._get_scan_summary_from_db(scan_run_id)
+            
+            if not findings and notification_type != 'summary':
+                logger.info("No findings to notify")
+                return True
+            
+            # Send notification using existing method
+            success = self.send_findings_notification(findings, notification_type, summary_data)
+            
+            # Track notification in database
+            if success:
+                self._track_notification(scan_run_id, findings, notification_type)
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error sending notification from DB: {e}")
+            logger.exception(e)
+            return False
+    
+    def _get_findings_from_db(self, scan_run_id: int, notification_type: str) -> List[Dict[str, Any]]:
+        """
+        Get findings from database for notification
+        
+        Args:
+            scan_run_id: Scan run ID
+            notification_type: Type of notification
+            
+        Returns:
+            List of findings
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                if notification_type == 'critical':
+                    # Get critical findings only
+                    query = '''
+                        SELECT DISTINCT
+                            s.id as secret_id,
+                            s.secret_type as type,
+                            s.detector_name,
+                            s.severity,
+                            s.is_verified as verified,
+                            s.is_active,
+                            u.url,
+                            f.line_number,
+                            f.snippet,
+                            f.validation_status,
+                            f.validation_result,
+                            CASE 
+                                WHEN b.id IS NULL THEN 'new'
+                                ELSE 'existing'
+                            END as baseline_status
+                        FROM findings f
+                        JOIN secrets s ON f.secret_id = s.id
+                        JOIN urls u ON f.url_id = u.id
+                        LEFT JOIN baselines b ON s.id = b.secret_id
+                        WHERE f.scan_run_id = ?
+                        AND s.severity = 'critical'
+                        AND s.is_active = 1
+                        ORDER BY s.severity DESC, s.secret_type
+                    '''
+                    rows = conn.execute(query, (scan_run_id,)).fetchall()
+                    
+                elif notification_type == 'new':
+                    # Get new findings not in baseline
+                    query = '''
+                        SELECT DISTINCT
+                            s.id as secret_id,
+                            s.secret_type as type,
+                            s.detector_name,
+                            s.severity,
+                            s.is_verified as verified,
+                            s.is_active,
+                            u.url,
+                            f.line_number,
+                            f.snippet,
+                            f.validation_status,
+                            f.validation_result,
+                            'new' as baseline_status
+                        FROM findings f
+                        JOIN secrets s ON f.secret_id = s.id
+                        JOIN urls u ON f.url_id = u.id
+                        LEFT JOIN baselines b ON s.id = b.secret_id
+                        WHERE f.scan_run_id = ?
+                        AND b.id IS NULL
+                        ORDER BY s.severity DESC, s.secret_type
+                    '''
+                    rows = conn.execute(query, (scan_run_id,)).fetchall()
+                    
+                else:
+                    # Get all findings for summary
+                    query = '''
+                        SELECT DISTINCT
+                            s.id as secret_id,
+                            s.secret_type as type,
+                            s.detector_name,
+                            s.severity,
+                            s.is_verified as verified,
+                            s.is_active,
+                            u.url,
+                            f.line_number,
+                            f.snippet,
+                            f.validation_status,
+                            f.validation_result,
+                            CASE 
+                                WHEN b.id IS NULL THEN 'new'
+                                ELSE 'existing'
+                            END as baseline_status
+                        FROM findings f
+                        JOIN secrets s ON f.secret_id = s.id
+                        JOIN urls u ON f.url_id = u.id
+                        LEFT JOIN baselines b ON s.id = b.secret_id
+                        WHERE f.scan_run_id = ?
+                        ORDER BY s.severity DESC, s.secret_type
+                        LIMIT 100
+                    '''
+                    rows = conn.execute(query, (scan_run_id,)).fetchall()
+                
+                # Convert rows to dictionaries
+                findings = []
+                for row in rows:
+                    finding = dict(row)
+                    
+                    # Parse JSON fields
+                    if finding.get('validation_result'):
+                        try:
+                            finding['validation_result'] = json.loads(finding['validation_result'])
+                        except:
+                            finding['validation_result'] = {}
+                    
+                    # For deduplication purposes, add a dummy 'raw' field
+                    # (The actual secret value is not stored in findings for security)
+                    finding['raw'] = f"secret_{finding['secret_id']}"
+                    
+                    findings.append(finding)
+                
+                return findings
+                
+        except Exception as e:
+            logger.error(f"Error getting findings from DB: {e}")
+            logger.exception(e)
+            return []
+    
+    def _get_scan_summary_from_db(self, scan_run_id: int) -> Dict[str, Any]:
+        """
+        Get scan summary from database
+        
+        Args:
+            scan_run_id: Scan run ID
+            
+        Returns:
+            Summary data
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                # Get scan run details
+                scan_row = conn.execute('''
+                    SELECT * FROM scan_runs WHERE id = ?
+                ''', (scan_run_id,)).fetchone()
+                
+                if not scan_row:
+                    return {}
+                
+                scan_data = dict(scan_row)
+                
+                # Calculate duration
+                if scan_data.get('started_at') and scan_data.get('completed_at'):
+                    start = datetime.fromisoformat(scan_data['started_at'])
+                    end = datetime.fromisoformat(scan_data['completed_at'])
+                    duration = end - start
+                    scan_data['duration'] = str(duration).split('.')[0]  # Remove microseconds
+                
+                # Get unique secret count
+                unique_count = conn.execute('''
+                    SELECT COUNT(DISTINCT secret_id) as count
+                    FROM findings
+                    WHERE scan_run_id = ?
+                ''', (scan_run_id,)).fetchone()
+                scan_data['total_unique_secrets'] = unique_count['count'] if unique_count else 0
+                
+                # Get verified active count
+                verified_count = conn.execute('''
+                    SELECT COUNT(DISTINCT s.id) as count
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    WHERE f.scan_run_id = ?
+                    AND s.is_verified = 1
+                    AND s.is_active = 1
+                ''', (scan_run_id,)).fetchone()
+                scan_data['verified_active'] = verified_count['count'] if verified_count else 0
+                
+                # Parse domains JSON
+                if scan_data.get('domains'):
+                    try:
+                        domains = json.loads(scan_data['domains'])
+                        scan_data['domain'] = domains[0] if domains else 'Unknown'
+                    except:
+                        scan_data['domain'] = 'Unknown'
+                
+                # Add scan_id
+                scan_data['scan_id'] = f"scan_{scan_run_id}_{scan_data.get('started_at', '').replace(':', '-').replace(' ', '_')}"
+                scan_data['urls_scanned'] = scan_data.get('total_urls_scanned', 0)
+                
+                return scan_data
+                
+        except Exception as e:
+            logger.error(f"Error getting scan summary from DB: {e}")
+            return {}
+    
+    def _track_notification(self, scan_run_id: int, findings: List[Dict[str, Any]], 
+                          notification_type: str):
+        """
+        Track sent notifications in database
+        
+        Args:
+            scan_run_id: Scan run ID
+            findings: List of findings
+            notification_type: Type of notification
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                # Track overall notification
+                conn.execute('''
+                    INSERT INTO notification_history 
+                    (scan_run_id, notification_type, status)
+                    VALUES (?, ?, ?)
+                ''', (scan_run_id, notification_type, 'sent'))
+                
+                # Track individual secrets if needed
+                for finding in findings[:10]:  # Limit to prevent too many records
+                    if 'secret_id' in finding:
+                        conn.execute('''
+                            INSERT INTO notification_history 
+                            (scan_run_id, secret_id, notification_type, status)
+                            VALUES (?, ?, ?, ?)
+                        ''', (scan_run_id, finding['secret_id'], notification_type, 'sent'))
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error tracking notification: {e}")
+    
+    def get_last_notification_time(self, scan_type: Optional[str] = None) -> Optional[datetime]:
+        """
+        Get the last notification time from database
+        
+        Args:
+            scan_type: Optional scan type filter
+            
+        Returns:
+            Last notification datetime or None
+        """
+        try:
+            with sqlite3.connect(str(self.db_path)) as conn:
+                query = '''
+                    SELECT MAX(sent_at) as last_sent
+                    FROM notification_history
+                    WHERE status = 'sent'
+                '''
+                
+                if scan_type:
+                    query += " AND notification_type = ?"
+                    result = conn.execute(query, (scan_type,)).fetchone()
+                else:
+                    result = conn.execute(query).fetchone()
+                
+                if result and result[0]:
+                    return datetime.fromisoformat(result[0])
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting last notification time: {e}")
+            return None
+    
+    def check_rate_limit(self) -> bool:
+        """
+        Check if we should wait before sending another notification
+        
+        Returns:
+            True if OK to send, False if should wait
+        """
+        last_time = self.get_last_notification_time()
+        if not last_time:
+            return True
+        
+        time_since_last = (datetime.utcnow() - last_time).total_seconds()
+        return time_since_last >= self.rate_limit_delay
     
     def send_findings_notification(self, findings: List[Dict[str, Any]], 
                                  notification_type: str = 'new',
@@ -95,6 +449,11 @@ class SlackNotifier:
             if not findings and notification_type != 'summary':
                 logger.info("No findings to notify")
                 return True
+            
+            # Check rate limit
+            if not self.check_rate_limit():
+                logger.warning("Rate limit hit, skipping notification")
+                return False
             
             # Prepare message based on type
             if notification_type == 'critical':
@@ -376,6 +735,7 @@ class SlackNotifier:
     def _analyze_findings_improved(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Improved analysis focusing on unique findings and new discoveries
+        Fixed to work with redacted secrets from database
         
         Returns:
             Dictionary with analysis results
@@ -386,27 +746,30 @@ class SlackNotifier:
             'by_severity_new': defaultdict(int),
             'total_unique': 0,
             'total_new': 0,
-            # 'total_secrets': len(findings),
             'total_verified': 0,
             'total_active': 0,
-            'global_unique_secrets': set()  # Track ALL unique secrets globally
+            'global_unique_secrets': set()  # Track ALL unique secrets globally by secret_id
         }
         
-        # First pass: collect all unique secrets globally
+        # First pass: collect all unique secrets globally using secret_id instead of raw value
         for finding in findings:
-            secret_value = finding.get('raw', finding.get('secret', ''))
-            if secret_value:
-                analysis['global_unique_secrets'].add(secret_value)
+            # Use secret_id or secret_hash for uniqueness since raw values are redacted
+            secret_identifier = finding.get('secret_id') or finding.get('secret_hash', '')
+            if secret_identifier:
+                analysis['global_unique_secrets'].add(str(secret_identifier))
         
         # Set the correct total unique count
         analysis['total_unique'] = len(analysis['global_unique_secrets'])
         
         # Process each finding
+        processed_secrets = set()  # Track processed secret_ids to avoid double counting
+        
         for finding in findings:
             secret_type = finding.get('type', 'unknown')
             severity = finding.get('severity', 'unknown')
-            secret_value = finding.get('raw', finding.get('secret', ''))
+            secret_identifier = finding.get('secret_id') or finding.get('secret_hash', '')
             url = finding.get('url', '')
+            baseline_status = finding.get('baseline_status', 'new')
             
             # Create group key
             group_key = (secret_type, severity)
@@ -425,36 +788,29 @@ class SlackNotifier:
             
             group = analysis['groups'][group_key]
             
-            # Track unique secrets within this group
-            if secret_value and secret_value not in group['unique_secrets']:
-                group['unique_secrets'].add(secret_value)
+            # Track unique secrets within this group using secret_id
+            if secret_identifier and str(secret_identifier) not in group['unique_secrets']:
+                group['unique_secrets'].add(str(secret_identifier))
                 group['unique_count'] += 1
                 
                 # Only count for severity breakdown if this is the first time we see this secret
                 # across ALL groups (to avoid double counting in severity stats)
-                secret_already_counted = False
-                for other_key, other_group in analysis['groups'].items():
-                    if other_key != group_key and secret_value in other_group.get('unique_secrets', set()):
-                        secret_already_counted = True
-                        break
-                
-                if not secret_already_counted:
+                if str(secret_identifier) not in processed_secrets:
                     analysis['by_severity_unique'][severity] += 1
-                
-                # Track if this unique secret is new
-                baseline_status = finding.get('baseline_status', 'new')  # Default to 'new' if not specified
-                if baseline_status == 'new':
-                    group['new_count'] += 1
-                    if not secret_already_counted:
+                    processed_secrets.add(str(secret_identifier))
+                    
+                    # Track if this unique secret is new
+                    if baseline_status == 'new':
+                        group['new_count'] += 1
                         analysis['by_severity_new'][severity] += 1
                         analysis['total_new'] += 1
-                
-                # Track verification status
-                if finding.get('verified') or finding.get('validation_result', {}).get('valid'):
-                    group['verified_count'] += 1
-                    analysis['total_verified'] += 1
-                    if finding.get('validation_result', {}).get('active'):
-                        analysis['total_active'] += 1
+                    
+                    # Track verification status
+                    if finding.get('verified') or finding.get('validation_result', {}).get('valid'):
+                        group['verified_count'] += 1
+                        analysis['total_verified'] += 1
+                        if finding.get('validation_result', {}).get('active'):
+                            analysis['total_active'] += 1
             
             # Track URLs (keep all occurrences but deduplicate)
             if url and url not in [u['url'] for u in group['urls']]:
@@ -463,9 +819,11 @@ class SlackNotifier:
                     'display': self._format_url_for_display(url)
                 })
             
-            # Keep sample findings (first 3 unique)
-            if len(group['sample_findings']) < 3 and secret_value not in [f.get('raw', '') for f in group['sample_findings']]:
-                group['sample_findings'].append(finding)
+            # Keep sample findings (first 3 unique by secret_id)
+            if len(group['sample_findings']) < 3:
+                existing_ids = [f.get('secret_id') or f.get('secret_hash', '') for f in group['sample_findings']]
+                if secret_identifier not in existing_ids:
+                    group['sample_findings'].append(finding)
         
         # Determine status for each group
         for group_key, group in analysis['groups'].items():
@@ -475,6 +833,12 @@ class SlackNotifier:
                 group['status'] = "Invalid/Inactive"
             else:
                 group['status'] = "Not Verified"
+        
+        # Debug logging
+        logger.debug(f"Analysis results: {analysis['total_unique']} unique, {analysis['total_new']} new")
+        logger.debug(f"Groups: {list(analysis['groups'].keys())}")
+        for (secret_type, severity), group in analysis['groups'].items():
+            logger.debug(f"  {secret_type} ({severity}): {group['unique_count']} unique, {group['new_count']} new")
         
         return analysis
     

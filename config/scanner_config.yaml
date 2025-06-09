@@ -1,0 +1,8 @@
+# Database configuration
+database:
+  path: ./data/scanner.db
+  
+# Data storage paths  
+data_storage_path: ./data
+
+# Other existing configurations...

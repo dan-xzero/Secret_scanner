@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""
-Validator Module for Automated Secrets Scanner
-Handles validation of discovered secrets
-"""
+"""Validator Module"""
 
 from .auto_validator import AutoValidator
-from .manual_review import ManualReviewInterface
 from .baseline_manager import BaselineManager
 
-__all__ = [
-    'AutoValidator',
-    'ManualReviewInterface',
-    'BaselineManager'
-]
+__all__ = ['AutoValidator', 'BaselineManager']
 
-# Module version
-__version__ = '1.0.0'
+def create_validator(config, db_path=None):
+    """Create validator with database support"""
+    return AutoValidator(config, db_path)
+
+def create_baseline_manager(config, db_path=None):
+    """Create baseline manager with database support"""
+    return BaselineManager(config, db_path)

@@ -1,14 +1,11 @@
-"""
-Content Fetcher Module
-
-This module handles crawling websites and extracting HTML/JavaScript content
-using Crawlee and Playwright for dynamic content rendering.
-"""
+#!/usr/bin/env python3
+"""Content Fetcher Module"""
 
 from .fetcher import ContentFetcher
-from .content_organizer import ContentOrganizer
 from .static_fetcher import StaticFetcher
 
-__all__ = ['ContentFetcher', 'ContentOrganizer', 'StaticFetcher']
+__all__ = ['ContentFetcher', 'StaticFetcher']
 
-__version__ = '1.0.0'
+def create_content_fetcher(config, db_path=None):
+    """Create content fetcher with database support"""
+    return ContentFetcher(config, db_path)

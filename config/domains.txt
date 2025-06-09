@@ -1,9 +1,3 @@
-www.wayfair.com
-secure.wayfair.com
-partner.wayfair.com
-
-
-
 # ===================================
 # TARGET DOMAINS FOR SECRET SCANNING
 # ===================================

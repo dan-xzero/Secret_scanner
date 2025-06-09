@@ -1,9 +1,8 @@
 /**
  * Enhanced Crawlee-based Web Crawler for Secret Scanner
- * WITH URL MAPPING FUNCTIONALITY
+ * WITH URL-BASED FILENAME SUPPORT
  * 
- * This is the complete enhanced crawler.js file with URL mapping added.
- * Replace your existing crawler.js with this version.
+ * Modified to accept and use URL-to-filename mappings from the main scanner
  */
 
 const { PlaywrightCrawler, Dataset, KeyValueStore, log, LogLevel } = require('crawlee');
@@ -32,6 +31,11 @@ const argv = yargs(hideBin(process.argv))
     description: 'Output directory for fetched content',
     type: 'string',
     demandOption: true
+  })
+  .option('url-mapping', {
+    alias: 'u',
+    description: 'URL to filename mapping file',
+    type: 'string'
   })
   .option('config', {
     alias: 'c',
@@ -103,7 +107,7 @@ const logger = winston.createLogger({
 log.setLevel(argv.verbose ? LogLevel.DEBUG : LogLevel.INFO);
 
 // Validate timeout
-if (argv.timeout > 300) {  // More than 5 minutes
+if (argv.timeout > 300) {
   logger.warn(`Timeout value ${argv.timeout} seconds seems too large, using 60 seconds instead`);
   argv.timeout = 60;
 }
@@ -126,11 +130,14 @@ const stats = {
 // Intercepted JavaScript files
 const interceptedJsFiles = new Map();
 
-// URL MAPPING - NEW ADDITION
+// URL-based filename mapping from main scanner
+let providedUrlMapping = {};
+
+// URL mappings for tracking
 const urlMappings = {
-  fileToUrl: {},      // Maps local file paths to original URLs
-  urlToFile: {},      // Maps original URLs to local file paths
-  metadata: {}        // Additional metadata for each mapping
+  fileToUrl: {},
+  urlToFile: {},
+  metadata: {}
 };
 
 // Blocked domains for resource optimization
@@ -146,11 +153,53 @@ const BLOCKED_DOMAINS = [
 // Blocked resource types
 const BLOCKED_RESOURCE_TYPES = [
   'image', 'media', 'font', 'stylesheet', 'ping', 'websocket', 'manifest',
-  'other' // This catches things like favicons
+  'other'
 ];
 
 /**
- * Generate a safe filename from a URL
+ * Load URL to filename mapping if provided
+ */
+async function loadUrlMapping() {
+  if (argv.urlMapping) {
+    try {
+      const mappingContent = await fs.readFile(argv.urlMapping, 'utf-8');
+      providedUrlMapping = JSON.parse(mappingContent);
+      logger.info(`Loaded URL mapping for ${Object.keys(providedUrlMapping).length} URLs`);
+    } catch (error) {
+      logger.warn(`Failed to load URL mapping: ${error.message}`);
+    }
+  }
+}
+
+/**
+ * Get filename for URL - uses provided mapping or generates one
+ */
+function getFilenameForUrl(url, extension = '') {
+  // Check if we have a provided filename
+  if (providedUrlMapping[url]) {
+    const providedFilename = providedUrlMapping[url];
+    
+    // If the provided filename already has the correct extension, use it as-is
+    if (providedFilename.endsWith(extension)) {
+      return providedFilename;
+    }
+    
+    // If extensions don't match, append the correct one
+    if (extension && !providedFilename.endsWith(extension)) {
+      // Remove any existing extension
+      const base = providedFilename.replace(/\.[^.]+$/, '');
+      return base + extension;
+    }
+    
+    return providedFilename;
+  }
+  
+  // Fallback to hash-based filename
+  return getSafeFilename(url, extension);
+}
+
+/**
+ * Generate a safe filename from a URL (fallback)
  */
 function getSafeFilename(url, extension = '') {
   const hash = crypto.createHash('md5').update(url).digest('hex');
@@ -174,7 +223,7 @@ function getSafeFilename(url, extension = '') {
 }
 
 /**
- * Add URL mapping - NEW FUNCTION
+ * Add URL mapping
  */
 function addUrlMapping(localPath, originalUrl, contentType) {
   // Make path relative to output directory
@@ -207,7 +256,7 @@ function addUrlMapping(localPath, originalUrl, contentType) {
 }
 
 /**
- * Save URL mappings to file - NEW FUNCTION
+ * Save URL mappings to file
  */
 async function saveUrlMappings(outputDir) {
   const mappingPath = path.join(outputDir, 'url_mappings.json');
@@ -264,7 +313,6 @@ function extractInlineScripts(html) {
   
   while ((match = scriptRegex.exec(html)) !== null) {
     const scriptContent = match[1].trim();
-    // Skip empty scripts, comments, and external scripts
     if (scriptContent && 
         !scriptContent.startsWith('//') && 
         !scriptContent.includes('src=') &&
@@ -310,13 +358,9 @@ function extractJavaScriptUrls(html, baseUrl) {
  * Check if URL should be processed based on configuration
  */
 function shouldProcessUrl(url) {
-  // Skip data URLs
   if (url.startsWith('data:')) return false;
-  
-  // Skip blob URLs
   if (url.startsWith('blob:')) return false;
   
-  // Check custom patterns
   const { includePatterns, excludePatterns } = crawleeConfig.urlProcessing || {};
   
   if (includePatterns && includePatterns.length > 0) {
@@ -351,7 +395,6 @@ async function processUrlBatch(urls, crawler) {
     
     await crawler.addRequests(batch);
     
-    // Add a small delay between batches to avoid overwhelming the target
     if (i < batches.length - 1) {
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
@@ -363,6 +406,9 @@ async function processUrlBatch(urls, crawler) {
  */
 async function runCrawler() {
   try {
+    // Load URL mapping if provided
+    await loadUrlMapping();
+    
     // Read URLs from input file
     logger.info(`Reading URLs from: ${argv.input}`);
     const urlsContent = await fs.readFile(argv.input, 'utf-8');
@@ -398,12 +444,9 @@ async function runCrawler() {
       maxConcurrency: argv.concurrency,
       requestHandlerTimeoutSecs: argv.timeout,
       maxRequestRetries: 3,
-      
-      // Retry configuration
       retryOnBlocked: true,
       
       launchContext: {
-        // launcher: crawleeConfig.playwright?.browserType || 'chromium',
         launchOptions: {
           headless: argv.headless,
           args: [
@@ -428,8 +471,7 @@ async function runCrawler() {
       
       preNavigationHooks: [
         async ({ page, request }) => {
-          // Set timeouts
-          const timeoutMs = argv.timeout * 1000;  // Convert seconds to milliseconds
+          const timeoutMs = argv.timeout * 1000;
           page.setDefaultNavigationTimeout(timeoutMs);
           page.setDefaultTimeout(timeoutMs);
           
@@ -439,10 +481,7 @@ async function runCrawler() {
             const url = request.url();
             const resourceType = request.resourceType();
             
-            // Check if domain is blocked
             const isBlockedDomain = BLOCKED_DOMAINS.some(domain => url.includes(domain));
-            
-            // Check if resource type is blocked
             const isBlockedType = BLOCKED_RESOURCE_TYPES.includes(resourceType);
             
             if (isBlockedDomain || isBlockedType) {
@@ -456,7 +495,7 @@ async function runCrawler() {
                 const response = await route.fetch();
                 if (response.ok()) {
                   const content = await response.text();
-                  if (content && content.length < 10 * 1024 * 1024) { // 10MB limit
+                  if (content && content.length < 10 * 1024 * 1024) {
                     interceptedJsFiles.set(url, {
                       content,
                       fromPage: request.url,
@@ -508,7 +547,7 @@ async function runCrawler() {
           logger.info(`Processing: ${url} (attempt ${request.retryCount + 1})`);
           stats.urlsProcessed++;
           
-          // Wait for page to load with multiple strategies
+          // Wait for page to load
           try {
             await page.waitForLoadState('networkidle', { timeout: 30000 });
           } catch (e) {
@@ -516,10 +555,8 @@ async function runCrawler() {
             await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
           }
           
-          // Additional wait for dynamic content
           await page.waitForTimeout(2000);
           
-          // Try to wait for specific content if configured
           if (crawleeConfig.contentExtraction?.waitForSelector) {
             try {
               await page.waitForSelector(crawleeConfig.contentExtraction.waitForSelector, {
@@ -530,7 +567,7 @@ async function runCrawler() {
             }
           }
           
-          // Get page content with fallback
+          // Get page content
           let html = '';
           try {
             html = await page.content();
@@ -539,18 +576,16 @@ async function runCrawler() {
             html = await page.evaluate(() => document.documentElement.outerHTML);
           }
           
-          // Validate content
           if (!html || html.length < 100) {
             throw new Error(`Content too short (${html.length} bytes)`);
           }
           
-          // Save HTML
-          const htmlFilename = getSafeFilename(url, '.html');
+          // Save HTML with URL-based filename
+          const htmlFilename = getFilenameForUrl(url, '.html');
           const htmlPath = path.join(dirs.html, htmlFilename);
           
           if (await saveContent(html, htmlPath)) {
             stats.htmlSaved++;
-            // ADD URL MAPPING
             addUrlMapping(htmlPath, url, 'html');
           }
           
@@ -559,7 +594,10 @@ async function runCrawler() {
           
           for (let i = 0; i < inlineScripts.length; i++) {
             const script = inlineScripts[i];
-            const scriptFilename = getSafeFilename(url, `_inline_${i}.js`);
+            
+            // Generate filename for inline script
+            const baseFilename = getFilenameForUrl(url, '');
+            const scriptFilename = `${baseFilename}_inline_${i}.js`;
             const scriptPath = path.join(dirs.inlineScripts, scriptFilename);
             
             const finalContent = argv.beautify !== false
@@ -569,14 +607,13 @@ async function runCrawler() {
             if (await saveContent(finalContent, scriptPath)) {
               stats.inlineScriptsSaved++;
               
-              // ADD URL MAPPING FOR INLINE SCRIPT
               const inlineScriptUrl = `${url}#inline-script-${i}`;
               addUrlMapping(scriptPath, inlineScriptUrl, 'inline-script');
               
-              // Save inline script metadata with URL reference
+              // Save metadata
               const inlineScriptMeta = {
-                url: url,  // Original HTML page URL
-                inline_script_url: inlineScriptUrl,  // Virtual URL for inline script
+                url: url,
+                inline_script_url: inlineScriptUrl,
                 type: 'inline_script',
                 parent_url: url,
                 script_index: i,
@@ -587,7 +624,8 @@ async function runCrawler() {
                                       script.content.toLowerCase().includes('password')
               };
               
-              const inlineMetaPath = path.join(dirs.metadata, getSafeFilename(`${url}_inline_${i}`, '_inline.json'));
+              const metaFilename = `${baseFilename}_inline_${i}_meta.json`;
+              const inlineMetaPath = path.join(dirs.metadata, metaFilename);
               await saveContent(JSON.stringify(inlineScriptMeta, null, 2), inlineMetaPath);
             }
           }
@@ -596,21 +634,19 @@ async function runCrawler() {
           const jsUrls = extractJavaScriptUrls(html, url);
           logger.debug(`Found ${jsUrls.length} JavaScript URLs in ${url}`);
           
-          // Check response headers for JSON content
+          // Check for JSON content
           const contentType = response.headers()['content-type'] || '';
           if (contentType.includes('application/json')) {
-            const jsonFilename = getSafeFilename(url, '.json');
+            const jsonFilename = getFilenameForUrl(url, '.json');
             const jsonPath = path.join(dirs.json, jsonFilename);
             
             try {
               const responseBody = await response.text();
-              // Try to pretty-print JSON
               const jsonData = JSON.parse(responseBody);
               const prettyJson = JSON.stringify(jsonData, null, 2);
               
               if (await saveContent(prettyJson, jsonPath)) {
                 stats.jsonSaved++;
-                // ADD URL MAPPING
                 addUrlMapping(jsonPath, url, 'json');
               }
             } catch (e) {
@@ -631,7 +667,8 @@ async function runCrawler() {
             attempt: request.retryCount + 1
           };
           
-          const metadataPath = path.join(dirs.metadata, getSafeFilename(url, '.json'));
+          const metadataFilename = getFilenameForUrl(url, '_meta.json');
+          const metadataPath = path.join(dirs.metadata, metadataFilename);
           await saveContent(JSON.stringify(metadata, null, 2), metadataPath);
           
           stats.urlsSuccessful++;
@@ -651,16 +688,15 @@ async function runCrawler() {
             statusCode: response?.status()
           };
           
-          // Track failed URLs
           stats.failedUrls.push(url);
           stats.errorDetails[url] = errorInfo;
           
-          const errorPath = path.join(dirs.errors, getSafeFilename(url, '.json'));
+          const errorFilename = getFilenameForUrl(url, '_error.json');
+          const errorPath = path.join(dirs.errors, errorFilename);
           await saveContent(JSON.stringify(errorInfo, null, 2), errorPath);
           
           logger.error(`✗ Failed ${url} after ${Date.now() - startTime}ms: ${error.message}`);
           
-          // Re-throw to trigger retry
           throw error;
         }
       },
@@ -668,7 +704,6 @@ async function runCrawler() {
       failedRequestHandler: async ({ request, error }) => {
         logger.error(`Request completely failed for ${request.url}: ${error.message}`);
         
-        // Save to failed URLs list
         const failedUrlsPath = path.join(outputDir, 'failed_urls.txt');
         await fs.appendFile(failedUrlsPath, `${request.url}\n`);
       }
@@ -685,7 +720,7 @@ async function runCrawler() {
     logger.info(`Processing ${interceptedJsFiles.size} intercepted JavaScript files...`);
     
     for (const [jsUrl, jsData] of interceptedJsFiles) {
-      const jsFilename = getSafeFilename(jsUrl, '.js');
+      const jsFilename = getFilenameForUrl(jsUrl, '.js');
       const jsPath = path.join(dirs.js, jsFilename);
       
       const finalContent = argv.beautify !== false
@@ -695,7 +730,6 @@ async function runCrawler() {
       if (await saveContent(finalContent, jsPath)) {
         stats.jsSaved++;
         
-        // ADD URL MAPPING
         addUrlMapping(jsPath, jsUrl, 'javascript');
         
         // Save JS metadata
@@ -707,12 +741,13 @@ async function runCrawler() {
           timestamp: new Date().toISOString()
         };
         
-        const jsMetadataPath = path.join(dirs.metadata, getSafeFilename(jsUrl, '_js.json'));
+        const jsMetadataFilename = getFilenameForUrl(jsUrl, '_js_meta.json');
+        const jsMetadataPath = path.join(dirs.metadata, jsMetadataFilename);
         await saveContent(JSON.stringify(jsMetadata, null, 2), jsMetadataPath);
       }
     }
     
-    // SAVE URL MAPPINGS - NEW ADDITION
+    // Save URL mappings
     await saveUrlMappings(outputDir);
     
     // Save final statistics

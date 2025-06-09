@@ -1,13 +1,13 @@
 """
-Enhanced Secret Scanner Wrapper
+Enhanced Secret Scanner Wrapper with Database Integration
 
 Key improvements:
-1. Better tool coordination and parallel execution
-2. Enhanced pattern matching with context
-3. Improved false positive filtering
-4. Better error handling and recovery
-5. Detailed finding metadata
-6. Enhanced URL mapping from crawler output
+1. Database-centric architecture for findings storage
+2. Better tool coordination and parallel execution
+3. Enhanced pattern matching with context
+4. Improved false positive filtering
+5. Better error handling and recovery
+6. Detailed finding metadata with URL mapping from database
 """
 
 import os
@@ -23,23 +23,27 @@ import re
 from collections import defaultdict
 import hashlib
 import math
+import sqlite3
+from datetime import datetime
 
 from loguru import logger
 
 
 class SecretScanner:
-    """Enhanced secret scanner orchestrating multiple tools."""
+    """Enhanced secret scanner orchestrating multiple tools with database integration."""
     
-    def __init__(self, config: Dict, logger=None):
+    def __init__(self, config: Dict, db_manager=None, logger=None):
         """
         Initialize Secret Scanner.
         
         Args:
-        config: Configuration dictionary
-        logger: Logger instance (loguru logger)
+            config: Configuration dictionary
+            db_manager: DatabaseManager instance
+            logger: Logger instance (loguru logger)
         """
         self.config = config
         self.logger = logger
+        self.db = db_manager
         
         # Tool configurations
         self.enable_trufflehog = config.get('enable_trufflehog', True)
@@ -76,7 +80,10 @@ class SecretScanner:
         # Validate tools
         self._validate_tools()
         
-        # Statistics
+        # Current scan run ID (set during scan)
+        self.current_scan_run_id = None
+        
+        # Statistics (will be stored in database)
         self.stats = {
             'files_scanned': 0,
             'files_skipped': 0,
@@ -251,162 +258,210 @@ class SecretScanner:
         
         return patterns
     
-    def _load_url_mappings(self, content_dir: str) -> Dict[str, str]:
-        """Load URL mappings from metadata files created by crawler."""
-        url_mappings = {}
-        content_path = Path(content_dir)
-        
-        self.logger.info(f"Loading URL mappings from {content_path}")
-        
-        # First, check if the crawler created a file_to_url_mappings.json
-        mappings_file = content_path / 'file_to_url_mappings.json'
-        if mappings_file.exists():
-            try:
-                with open(mappings_file, 'r') as f:
-                    crawler_mappings = json.load(f)
-                
-                # Add mappings with both relative and absolute paths
-                for relative_path, url in crawler_mappings.items():
-                    # Store with relative path as-is
-                    url_mappings[relative_path] = url
-                    
-                    # Also store with absolute path
-                    absolute_path = str(content_path / relative_path)
-                    url_mappings[absolute_path] = url
-                    
-                    # Also store with just the path relative to content dir
-                    # This handles cases where the scanner might have slightly different paths
-                    url_mappings[str(Path(relative_path))] = url
-                
-                self.logger.info(f"Loaded {len(crawler_mappings)} URL mappings from crawler output")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to load crawler mappings: {e}")
-        
-        # Also check url_mappings.json if it exists
-        url_mappings_file = content_path / 'url_mappings.json'
-        if url_mappings_file.exists():
-            try:
-                with open(url_mappings_file, 'r') as f:
-                    additional_mappings = json.load(f)
-                
-                # Extract URL to file mappings and reverse them
-                if 'urlToFile' in additional_mappings:
-                    for url, file_info in additional_mappings['urlToFile'].items():
-                        if isinstance(file_info, dict) and 'path' in file_info:
-                            file_path = file_info['path']
-                            # Store multiple path variations
-                            url_mappings[file_path] = url
-                            url_mappings[str(Path(file_path))] = url
-                            
-                            # Also store with absolute path
-                            if not file_path.startswith('/'):
-                                absolute_path = str(content_path / file_path)
-                                url_mappings[absolute_path] = url
-                
-                self.logger.debug(f"Loaded additional mappings from url_mappings.json")
-                
-            except Exception as e:
-                self.logger.debug(f"Failed to load additional mappings: {e}")
-        
-        # Fallback: Process individual metadata files if needed
-        metadata_dir = content_path / 'metadata'
-        if metadata_dir.exists() and len(url_mappings) == 0:
-            self.logger.info("No crawler mappings found, falling back to metadata files")
-            try:
-                for meta_file in metadata_dir.glob('*.json'):
-                    try:
-                        with open(meta_file, 'r') as f:
-                            metadata = json.load(f)
-                        
-                        url = metadata.get('url', '')
-                        if not url:
-                            continue
-                        
-                        # Get base name from metadata file
-                        base_name = meta_file.stem
-                        
-                        # Map HTML files
-                        html_file = content_path / 'html' / f"{base_name}.html"
-                        if html_file.exists():
-                            rel_path = str(html_file.relative_to(content_path))
-                            url_mappings[rel_path] = url
-                            url_mappings[str(html_file)] = url
-                        
-                        # Map JS files
-                        js_file = content_path / 'js' / f"{base_name}.js"
-                        if js_file.exists():
-                            rel_path = str(js_file.relative_to(content_path))
-                            url_mappings[rel_path] = url
-                            url_mappings[str(js_file)] = url
-                        
-                        # Map JSON files
-                        json_file = content_path / 'json' / f"{base_name}.json"
-                        if json_file.exists():
-                            rel_path = str(json_file.relative_to(content_path))
-                            url_mappings[rel_path] = url
-                            url_mappings[str(json_file)] = url
-                            
-                    except Exception as e:
-                        self.logger.debug(f"Failed to process metadata file {meta_file}: {e}")
+    def _get_url_for_file(self, file_path: str, base_directory: str) -> Optional[str]:
+        """Get URL for a file from the database with improved JS chunk mapping."""
+        if not self.db:
+            return None
+
+        try:
+            # Get the scan_id from the base directory or use the current scan run ID
+            if self.current_scan_run_id:
+                scan_id = self.current_scan_run_id
+            else:
+                # base_directory is like: data/content/scan_20250608_192410_46045
+                scan_id = Path(base_directory).name
+
+            # Get just the filename
+            filename = Path(file_path).name
             
-            except Exception as e:
-                self.logger.error(f"Error processing metadata directory: {e}")
-        
-        # Process inline scripts metadata files (these might have different naming)
-        inline_scripts_dir = content_path / 'inline-scripts'
-        if inline_scripts_dir.exists():
-            try:
-                # Check if inline script mappings are already in the main mappings
-                inline_mapped = any('inline-scripts/' in path for path in url_mappings)
+            # Skip metadata files - they don't have corresponding URLs
+            if filename.endswith('_meta.json'):
+                logger.debug(f"Skipping metadata file: {filename}")
+                return None
+
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # Method 1: Direct filename match
+            cursor.execute("""
+                SELECT url FROM urls 
+                WHERE scan_id = ? AND file_name = ?
+                LIMIT 1
+            """, (scan_id, filename))
+            
+            result = cursor.fetchone()
+            if result:
+                logger.debug(f"✓ Direct filename match: {filename} -> {result[0]}")
+                return result[0]
+            
+            # Method 2: File path contains filename
+            cursor.execute("""
+                SELECT url FROM urls 
+                WHERE scan_id = ? AND file_path LIKE ?
+                LIMIT 1
+            """, (scan_id, f'%/{filename}'))
+            
+            result = cursor.fetchone()
+            if result:
+                logger.debug(f"✓ File path match: {filename} -> {result[0]}")
+                return result[0]
+            
+            # Method 3: AGGRESSIVE MAPPING FOR JS CHUNKS
+            # For files like: 6436-337f484bdaef3a28_f173daa2.js
+            if '.js' in filename or filename.endswith('.js'):
+                logger.debug(f"🔍 Attempting JS chunk mapping for: {filename}")
                 
-                if not inline_mapped:
-                    # Try to find inline script metadata files
-                    for meta_file in metadata_dir.glob('*_inline.json'):
-                        try:
-                            with open(meta_file, 'r') as f:
-                                metadata = json.load(f)
-                            
-                            source_url = metadata.get('url', '')
-                            if source_url:
-                                # Look for corresponding inline script files
-                                base_name = meta_file.stem.replace('_inline', '')
-                                for js_file in inline_scripts_dir.glob(f"{base_name}_inline_*.js"):
-                                    rel_path = str(js_file.relative_to(content_path))
-                                    # Extract index from filename
-                                    index_match = re.search(r'_inline_(\d+)\.js$', js_file.name)
-                                    if index_match:
-                                        index = index_match.group(1)
-                                        inline_url = f"{source_url}#inline-script-{index}"
-                                        url_mappings[rel_path] = inline_url
-                                        url_mappings[str(js_file)] = inline_url
-                        
-                        except Exception as e:
-                            self.logger.debug(f"Failed to process inline metadata {meta_file}: {e}")
-                            
-            except Exception as e:
-                self.logger.debug(f"Error processing inline scripts: {e}")
-        
-        self.logger.info(f"Total URL mappings loaded: {len(url_mappings)}")
-        
-        # Debug: log a few sample mappings
-        if url_mappings:
-            samples = list(url_mappings.items())[:5]
-            for file_path, url in samples:
-                self.logger.debug(f"Sample mapping: {file_path} -> {url}")
-        
-        return url_mappings
+                # Strategy A: Find the most likely parent page based on domain patterns
+                
+                # First, try to find checkout.quince.com URLs since many JS chunks seem related to checkout
+                if any(term in filename.lower() for term in ['checkout', 'session', 'payment', 'pay']):
+                    cursor.execute("""
+                        SELECT url FROM urls 
+                        WHERE scan_id = ? 
+                        AND (
+                            url LIKE '%checkout.quince.com%' OR
+                            url LIKE '%checkout%' OR
+                            url LIKE '%payment%'
+                        )
+                        ORDER BY CASE 
+                            WHEN url LIKE '%checkout.quince.com%' THEN 1
+                            WHEN url LIKE '%checkout%' THEN 2
+                            ELSE 3
+                        END
+                        LIMIT 1
+                    """, (scan_id,))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        logger.info(f"✓ JS chunk mapped to checkout domain: {filename} -> {result[0]}")
+                        return result[0]
+                
+                # Strategy B: Find main domain pages (like quince.com)
+                cursor.execute("""
+                    SELECT url FROM urls 
+                    WHERE scan_id = ? 
+                    AND (
+                        url LIKE '%quince.com%' OR
+                        url LIKE '%www.quince.com%'
+                    )
+                    AND url NOT LIKE '%.js%'
+                    AND url NOT LIKE '%/js/%'
+                    ORDER BY CASE 
+                        WHEN url = 'https://www.quince.com/' THEN 1
+                        WHEN url = 'http://quince.com/' THEN 2
+                        WHEN url LIKE 'https://www.quince.com/%' THEN 3
+                        WHEN url LIKE '%quince.com/%' THEN 4
+                        ELSE 5 
+                    END,
+                    LENGTH(url)  -- Prefer shorter URLs (likely main pages)
+                    LIMIT 1
+                """, (scan_id,))
+                
+                result = cursor.fetchone()
+                if result:
+                    logger.info(f"✓ JS chunk mapped to main domain: {filename} -> {result[0]}")
+                    return result[0]
+                
+                # Strategy C: Map to any HTML page as final fallback
+                cursor.execute("""
+                    SELECT url FROM urls 
+                    WHERE scan_id = ? 
+                    AND (
+                        url LIKE '%.html' OR 
+                        (url NOT LIKE '%.%' AND url LIKE '%://%')  -- URLs without extensions
+                    )
+                    AND url IS NOT NULL
+                    AND url != ''
+                    ORDER BY CASE 
+                        WHEN url LIKE '%index%' THEN 1
+                        WHEN url LIKE '%www.%' THEN 2
+                        WHEN url LIKE '%checkout%' THEN 3
+                        ELSE 4 
+                    END,
+                    LENGTH(url)
+                    LIMIT 1
+                """, (scan_id,))
+                
+                result = cursor.fetchone()
+                if result:
+                    logger.warning(f"⚠️ JS chunk mapped to fallback HTML: {filename} -> {result[0]}")
+                    return result[0]
+                
+                # Strategy D: ABSOLUTE LAST RESORT - use ANY URL from this scan
+                cursor.execute("""
+                    SELECT url FROM urls 
+                    WHERE scan_id = ? 
+                    AND url IS NOT NULL 
+                    AND url != ''
+                    ORDER BY CASE 
+                        WHEN url LIKE '%www.%' THEN 1
+                        WHEN url LIKE '%.com/%' THEN 2
+                        ELSE 3
+                    END
+                    LIMIT 1
+                """, (scan_id,))
+                
+                result = cursor.fetchone()
+                if result:
+                    logger.error(f"🚨 JS chunk mapped to LAST RESORT URL: {filename} -> {result[0]}")
+                    return result[0]
+            
+            # Method 4: For non-JS files, try pattern matching
+            else:
+                # Extract meaningful parts of filename for search
+                base_name = Path(filename).stem
+                # Remove common suffixes and prefixes
+                clean_name = re.sub(r'[_-][a-f0-9]{8,}$', '', base_name)  # Remove hash suffixes
+                clean_name = re.sub(r'^[0-9]+-', '', clean_name)  # Remove number prefixes
+                
+                if len(clean_name) > 3:  # Only search if we have a meaningful name
+                    cursor.execute("""
+                        SELECT url FROM urls 
+                        WHERE scan_id = ? AND (
+                            url LIKE ? OR
+                            file_name LIKE ? OR
+                            file_path LIKE ?
+                        )
+                        LIMIT 1
+                    """, (scan_id, f'%{clean_name}%', f'%{clean_name}%', f'%{clean_name}%'))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        logger.debug(f"✓ Pattern match for non-JS: {filename} -> {result[0]}")
+                        return result[0]
+            
+            # If we still haven't found a URL, log detailed info for debugging
+            logger.warning(f"❌ NO URL MAPPING FOUND for file: {filename}")
+            
+            # Debug: Show what URLs we DO have in this scan
+            cursor.execute("""
+                SELECT COUNT(*), MIN(url) as sample_url, MAX(url) as max_url 
+                FROM urls 
+                WHERE scan_id = ? AND url IS NOT NULL
+            """, (scan_id,))
+            debug_result = cursor.fetchone()
+            if debug_result and debug_result[0] > 0:
+                logger.warning(f"Debug: Scan {scan_id} has {debug_result[0]} URLs. Sample: {debug_result[1]}")
+            else:
+                logger.error(f"Debug: Scan {scan_id} has NO URLs in database!")
+            
+            return None
+                    
+        except Exception as e:
+            logger.error(f"Failed to get URL for file {file_path}: {e}")
+            return None
     
-    def scan_directory(self, directory: str, scan_type: str = 'full') -> List[Dict]:
+    def scan_directory(self, directory: str, scan_type: str = 'full', scan_run_id: str = None) -> int:
         """
         Scan a directory for secrets using all enabled tools.
         
         Args:
             directory: Path to directory to scan
             scan_type: Type of scan ('full', 'quick', 'custom')
+            scan_run_id: Database scan run ID (string)
             
         Returns:
-            List of found secrets
+            Number of secrets found
         """
         self.logger.info(f"Starting {scan_type} secret scan of directory: {directory}")
         start_time = time.time()
@@ -415,8 +470,8 @@ class SecretScanner:
         if not dir_path.exists():
             raise ValueError(f"Directory does not exist: {directory}")
         
-        # Load URL mappings first
-        url_mappings = self._load_url_mappings(directory)
+        # Set current scan run ID
+        self.current_scan_run_id = scan_run_id
         
         # Count and filter files to scan
         files_to_scan = self._get_files_to_scan(dir_path, scan_type)
@@ -474,19 +529,181 @@ class SecretScanner:
         # Post-process findings
         unique_findings = self._deduplicate_findings(all_findings)
         filtered_findings = self._filter_false_positives(unique_findings)
-        enriched_findings = self._enrich_findings(filtered_findings, directory, url_mappings)
         
-        self.stats['secrets_found'] = len(enriched_findings)
+        # Store findings in database
+        stored_count = self._store_findings_in_database(filtered_findings, directory)
+        
+        self.stats['secrets_found'] = stored_count
         self.stats['scan_duration'] = time.time() - start_time
         self.stats['false_positives_filtered'] = len(unique_findings) - len(filtered_findings)
         
+        # Update scan statistics in database
+        self._update_scan_statistics()
+        
         self.logger.info(
             f"Scan completed in {self.stats['scan_duration']:.2f}s. "
-            f"Found {len(enriched_findings)} secrets "
+            f"Found {stored_count} secrets "
             f"({self.stats['false_positives_filtered']} false positives filtered)"
         )
         
-        return enriched_findings
+        return stored_count
+    
+    def _store_findings_in_database(self, findings: List[Dict], base_directory: str) -> int:
+        """Store findings in database with deduplication."""
+        if not self.db or not findings:
+            return 0
+        
+        stored_count = 0
+        
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            for finding in findings:
+                try:
+                    # Get URL for the file
+                    url = self._get_url_for_file(finding['file'], base_directory)
+                    
+                    # Log URL mapping for debugging
+                    if not url:
+                        self.logger.debug(f"No URL found for file: {finding['file']}")
+                    
+                    # Calculate secret hash
+                    secret_value = finding.get('raw', '')
+                    secret_hash = hashlib.sha256(secret_value.encode()).hexdigest()
+                    
+                    # Check if secret already exists
+                    cursor.execute("""
+                        SELECT id FROM secrets WHERE secret_hash = ?
+                    """, (secret_hash,))
+                    
+                    secret_result = cursor.fetchone()
+                    
+                    if secret_result:
+                        secret_id = secret_result[0]
+                        # Update last_seen
+                        cursor.execute("""
+                            UPDATE secrets 
+                            SET last_seen = CURRENT_TIMESTAMP 
+                            WHERE id = ?
+                        """, (secret_id,))
+                    else:
+                        # Insert new secret with actual value
+                        cursor.execute("""
+                            INSERT INTO secrets (
+                                secret_hash, secret_value, secret_type, detector_name,
+                                first_seen, last_seen, is_verified, is_active,
+                                severity, confidence
+                            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                        """, (
+                            secret_hash,
+                            secret_value,  # Store the actual secret value
+                            finding.get('type', 'unknown'),
+                            finding.get('detector', 'unknown'),
+                            finding.get('verified', False),
+                            True,  # is_active
+                            finding.get('severity', 'medium'),
+                            finding.get('confidence', 'medium')
+                        ))
+                        secret_id = cursor.lastrowid
+                    
+                    # Get URL ID if URL exists
+                    url_id = None
+                    if url:
+                        cursor.execute("""
+                            SELECT id FROM urls WHERE url = ?
+                        """, (url,))
+                        url_result = cursor.fetchone()
+                        if url_result:
+                            url_id = url_result[0]
+                    
+                    # Check if this specific finding already exists
+                    cursor.execute("""
+                        SELECT id FROM findings 
+                        WHERE secret_id = ? 
+                        AND (url_id = ? OR (url_id IS NULL AND ? IS NULL))
+                        AND file_path = ?
+                        AND line_number = ?
+                    """, (secret_id, url_id, url_id, finding.get('file', ''), finding.get('line', 0)))
+                    
+                    if not cursor.fetchone():
+                        # Insert finding
+                        cursor.execute("""
+                            INSERT INTO findings (
+                                secret_id, url_id, line_number, snippet,
+                                found_at, scan_run_id, file_path,
+                                validation_status, validation_result
+                            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                        """, (
+                            secret_id,
+                            url_id,
+                            finding.get('line', 0),
+                            finding.get('context', '')[:500],  # Limit snippet length
+                            self.current_scan_run_id,
+                            finding.get('file', ''),
+                            'pending',
+                            json.dumps({
+                                'confidence': finding.get('confidence', 'medium'),
+                                'metadata': finding.get('metadata', {})
+                            })
+                        ))
+                        stored_count += 1
+                    
+                    # Update statistics
+                    self.stats['secret_types'][finding.get('type', 'unknown')] += 1
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to store finding: {e}")
+                    conn.rollback()
+                    continue
+            
+            conn.commit()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to store findings in database: {e}")
+        
+        return stored_count
+    
+    def _update_scan_statistics(self):
+        """Update scan run statistics in database."""
+        if not self.db or not self.current_scan_run_id:
+            return
+        
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # Convert tool results and secret types to JSON
+            tool_results_json = json.dumps(dict(self.stats['tool_results']))
+            secret_types_json = json.dumps(dict(self.stats['secret_types']))
+            errors_json = json.dumps(self.stats['errors'])
+            
+            # Update scan run with additional statistics
+            cursor.execute("""
+                UPDATE scan_runs 
+                SET total_secrets_found = ?,
+                    tool_results = ?,
+                    secret_types = ?,
+                    errors = ?,
+                    files_scanned = ?,
+                    files_skipped = ?,
+                    false_positives_filtered = ?
+                WHERE id = ?
+            """, (
+                self.stats['secrets_found'],
+                tool_results_json,
+                secret_types_json,
+                errors_json,
+                self.stats['files_scanned'],
+                self.stats['files_skipped'],
+                self.stats['false_positives_filtered'],
+                self.current_scan_run_id
+            ))
+            
+            conn.commit()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to update scan statistics: {e}")
     
     def _get_files_to_scan(self, directory: Path, scan_type: str) -> List[Path]:
         """Get list of files to scan based on scan type."""
@@ -509,6 +726,11 @@ class SecretScanner:
         
         for file_path in directory.rglob('*'):
             if not file_path.is_file():
+                continue
+            
+            # Skip metadata files
+            if file_path.name.endswith('_meta.json'):
+                self.stats['files_skipped'] += 1
                 continue
             
             # Skip files that are too large
@@ -817,9 +1039,6 @@ class SecretScanner:
                 'timestamp': time.time()
             }
             
-            # Update stats
-            self.stats['secret_types'][parsed['type']] += 1
-            
             return parsed
             
         except Exception as e:
@@ -860,9 +1079,6 @@ class SecretScanner:
                 },
                 'timestamp': time.time()
             }
-            
-            # Update stats
-            self.stats['secret_types'][parsed['type']] += 1
             
             return parsed
             
@@ -955,96 +1171,6 @@ class SecretScanner:
             return True
         
         return False
-    
-    def _enrich_findings(self, findings: List[Dict], base_directory: str, url_mappings: Dict[str, str] = None) -> List[Dict]:
-        """Enhanced enrichment with better URL mapping."""
-        enriched = []
-        base_path = Path(base_directory)
-        
-        for finding in findings:
-            enriched_finding = finding.copy()
-            
-            # Add relative path
-            try:
-                file_path = Path(finding['file'])
-                if file_path.is_absolute():
-                    enriched_finding['relative_path'] = str(file_path.relative_to(base_path))
-                else:
-                    enriched_finding['relative_path'] = str(file_path)
-            except:
-                enriched_finding['relative_path'] = finding['file']
-            
-            # Enhanced URL mapping
-            url = None
-            if url_mappings:
-                # Try different path variations
-                file_str = finding['file']
-                relative_path = enriched_finding.get('relative_path', '')
-                
-                # Normalize paths for comparison
-                normalized_paths = [
-                    file_str,
-                    relative_path,
-                    str(Path(file_str)),
-                    str(Path(relative_path))
-                ]
-                
-                # Also try without leading directory components
-                if '/' in relative_path:
-                    parts = relative_path.split('/')
-                    for i in range(len(parts)):
-                        normalized_paths.append('/'.join(parts[i:]))
-                
-                # Check each normalized path
-                for path in normalized_paths:
-                    if path in url_mappings:
-                        url = url_mappings[path]
-                        self.logger.debug(f"Found URL mapping for {path}: {url}")
-                        break
-                
-                # If still no URL, try filename matching
-                if not url:
-                    file_name = Path(file_str).name
-                    for mapped_path, mapped_url in url_mappings.items():
-                        if Path(mapped_path).name == file_name:
-                            url = mapped_url
-                            self.logger.debug(f"Found URL by filename {file_name}: {url}")
-                            break
-            
-            # Set URL and source type
-            if url:
-                enriched_finding['url'] = url
-                # Determine if it's an inline script
-                if '#inline-script-' in url:
-                    enriched_finding['source_type'] = 'inline_script'
-                    enriched_finding['parent_url'] = url.split('#')[0]
-                else:
-                    enriched_finding['source_type'] = 'external_file'
-            else:
-                self.logger.debug(f"No URL mapping found for: {finding['file']}")
-                enriched_finding['url'] = ''
-                enriched_finding['source_type'] = 'unknown'
-            
-            # Add file type
-            enriched_finding['file_type'] = Path(finding['file']).suffix.lower()
-            
-            # Generate unique ID
-            enriched_finding['id'] = self._generate_finding_id(enriched_finding)
-            
-            # Add risk score
-            enriched_finding['risk_score'] = self._calculate_risk_score(enriched_finding)
-            
-            # Ensure metadata includes URL info
-            enriched_finding['metadata'] = enriched_finding.get('metadata', {})
-            enriched_finding['metadata']['url'] = enriched_finding.get('url', '')
-            enriched_finding['metadata']['source_type'] = enriched_finding.get('source_type', 'unknown')
-            
-            enriched.append(enriched_finding)
-        
-        # Sort by risk score
-        enriched.sort(key=lambda x: x['risk_score'], reverse=True)
-        
-        return enriched
     
     def _calculate_entropy(self, text: str) -> float:
         """Calculate Shannon entropy of text."""
@@ -1140,44 +1266,6 @@ class SecretScanner:
         else:
             return 'low'
     
-    def _calculate_risk_score(self, finding: Dict) -> int:
-        """Calculate risk score for prioritization."""
-        score = 0
-        
-        # Severity
-        severity_scores = {
-            'critical': 100,
-            'high': 75,
-            'medium': 50,
-            'low': 25
-        }
-        score += severity_scores.get(finding.get('severity', 'low'), 25)
-        
-        # Confidence
-        confidence_scores = {
-            'high': 30,
-            'medium': 20,
-            'low': 10
-        }
-        score += confidence_scores.get(finding.get('confidence', 'low'), 10)
-        
-        # Verification
-        if finding.get('verified'):
-            score += 50
-        
-        # File type
-        high_risk_extensions = ['.js', '.json', '.env', '.config', '.yml', '.yaml']
-        if finding.get('file_type') in high_risk_extensions:
-            score += 20
-        
-        # Entropy
-        secret = finding.get('raw', '')
-        entropy = self._calculate_entropy(secret)
-        if entropy > 4.5:
-            score += 10
-        
-        return min(score, 200)  # Cap at 200
-    
     def _redact_secret(self, secret: str) -> str:
         """Redact a secret for safe display."""
         if not secret:
@@ -1190,12 +1278,6 @@ class SecretScanner:
             return secret[:3] + '*' * (length - 6) + secret[-3:]
         else:
             return secret[:4] + '*' * 12 + secret[-4:]
-    
-    def _generate_finding_id(self, finding: Dict) -> str:
-        """Generate unique ID for a finding."""
-        # Create stable ID from finding properties
-        id_string = f"{finding.get('type')}:{finding.get('file')}:{finding.get('line')}:{finding.get('raw', '')[:20]}"
-        return hashlib.sha256(id_string.encode()).hexdigest()[:16]
     
     def get_statistics(self) -> Dict:
         """Get scanning statistics."""

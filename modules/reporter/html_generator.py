@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced HTML Report Generator for Secret Scanner
+Enhanced HTML Report Generator for Secret Scanner with Database Integration
 Generates interactive HTML reports with deduplication for secret findings
 """
 
@@ -16,16 +16,18 @@ from jinja2 import Template
 from loguru import logger
 
 class HTMLReportGenerator:
-    """Generates interactive HTML reports for secret findings with deduplication"""
+    """Generates interactive HTML reports for secret findings with database integration"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], db_manager=None):
         """
         Initialize HTML Report Generator
         
         Args:
             config: Configuration dictionary
+            db_manager: DatabaseManager instance
         """
         self.config = config
+        self.db = db_manager
         self.reports_path = Path(config.get('data_storage_path', './data')) / 'reports'
         self.reports_path.mkdir(parents=True, exist_ok=True)
         
@@ -43,11 +45,500 @@ class HTMLReportGenerator:
         
         logger.info(f"Enhanced HTML Report Generator initialized with reports path: {self.reports_path}")
     
+    def generate_report_from_db(self, scan_run_id: int = None, domains: List[str] = None,
+                               report_type: str = 'full', comparison_scan_id: int = None) -> Path:
+        """
+        Generate HTML report by loading data from database
+        
+        Args:
+            scan_run_id: Specific scan run to report on
+            domains: Filter by domains
+            report_type: Type of report ('full', 'new', 'summary')
+            comparison_scan_id: Previous scan ID for comparison
+            
+        Returns:
+            Path to generated report
+        """
+        if not self.db:
+            logger.error("No database connection available")
+            return None
+        
+        try:
+            logger.info(f"Generating {report_type} HTML report from database")
+            
+            # Load findings from database
+            findings = self._load_findings_from_db(scan_run_id, domains)
+            
+            if not findings:
+                logger.warning("No findings to report")
+            
+            # Load comparison data if requested
+            comparison_data = None
+            if comparison_scan_id:
+                comparison_data = self._load_comparison_data(scan_run_id, comparison_scan_id)
+            
+            # Load validation results
+            validation_results = self._load_validation_results_from_db(scan_run_id)
+            
+            # Generate report
+            report_path = self.generate_report(
+                findings=findings,
+                report_type=report_type,
+                comparison_data=comparison_data,
+                validation_results=validation_results,
+                scan_id=str(scan_run_id) if scan_run_id else None
+            )
+            
+            # Store report metadata in database
+            if report_path and scan_run_id:
+                self._store_report_metadata(scan_run_id, report_path, report_type)
+            
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"Error generating report from database: {e}")
+            logger.exception(e)
+            return None
+    
+    def _load_findings_from_db(self, scan_run_id: int = None, domains: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Load findings from database with proper baseline status calculation AND actual secret values
+        """
+        findings = []
+        
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Build query WITH actual secret values
+                query = """
+                    SELECT 
+                        f.id as finding_id,
+                        f.secret_id,
+                        f.line_number,
+                        f.snippet,
+                        f.file_path,
+                        f.validation_status,
+                        f.validation_result,
+                        f.found_at,
+                        s.secret_hash,
+                        s.secret_value,  -- GET THE ACTUAL SECRET VALUE
+                        s.secret_type,
+                        s.detector_name,
+                        s.severity,
+                        s.confidence,
+                        s.is_verified,
+                        s.is_active,
+                        u.url,
+                        u.domain,
+                        sr.scan_type,
+                        -- Calculate baseline status properly
+                        CASE 
+                            WHEN b.secret_id IS NOT NULL THEN 'false_positive'
+                            WHEN prev.secret_hash IS NOT NULL THEN 'recurring'
+                            ELSE 'new'
+                        END as baseline_status
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    LEFT JOIN scan_runs sr ON f.scan_run_id = sr.id
+                    -- Check if secret is in baseline (marked as false positive)
+                    LEFT JOIN baselines b ON s.id = b.secret_id 
+                        AND (u.domain = b.domain OR b.domain IS NULL OR u.domain IS NULL)
+                    -- Check if secret existed in previous scans
+                    LEFT JOIN (
+                        SELECT DISTINCT s2.secret_hash, u2.domain
+                        FROM findings f2
+                        JOIN secrets s2 ON f2.secret_id = s2.id
+                        LEFT JOIN urls u2 ON f2.url_id = u2.id
+                        WHERE f2.scan_run_id != COALESCE(?, 'dummy_scan_id')
+                    ) prev ON s.secret_hash = prev.secret_hash 
+                        AND (u.domain = prev.domain OR prev.domain IS NULL OR u.domain IS NULL)
+                    WHERE 1=1
+                """
+                
+                params = [scan_run_id or 'dummy_scan_id']  # For the subquery
+                
+                if scan_run_id:
+                    query += " AND f.scan_run_id = ?"
+                    params.append(scan_run_id)
+                
+                if domains:
+                    placeholders = ','.join(['?' for _ in domains])
+                    query += f" AND u.domain IN ({placeholders})"
+                    params.extend(domains)
+                
+                query += " ORDER BY s.severity DESC, f.found_at DESC"
+                
+                logger.debug(f"Executing findings query with params: {params}")
+                cursor.execute(query, params)
+                columns = [desc[0] for desc in cursor.description]
+                
+                for row in cursor.fetchall():
+                    finding_dict = dict(zip(columns, row))
+                    
+                    # Parse JSON fields
+                    if finding_dict.get('validation_result'):
+                        try:
+                            finding_dict['validation_result'] = json.loads(finding_dict['validation_result'])
+                        except:
+                            finding_dict['validation_result'] = {}
+                    
+                    # Get the actual secret value
+                    actual_secret = finding_dict.get('secret_value', '')
+                    
+                    # Map database fields to expected format
+                    finding = {
+                        'id': finding_dict['finding_id'],
+                        'secret_id': finding_dict['secret_id'],
+                        'type': finding_dict['secret_type'],
+                        'detector': finding_dict['detector_name'],
+                        'severity': finding_dict['severity'],
+                        'confidence': finding_dict['confidence'],
+                        'verified': finding_dict['is_verified'],
+                        'line': finding_dict['line_number'],
+                        'line_number': finding_dict['line_number'],
+                        'context': finding_dict['snippet'],
+                        'file': finding_dict['file_path'],
+                        'file_path': finding_dict['file_path'],
+                        'url': finding_dict['url'] or 'Unknown',
+                        'domain': finding_dict['domain'] or 'Unknown',
+                        'validation_status': finding_dict['validation_status'],
+                        'validation_result': finding_dict['validation_result'] or {},
+                        'timestamp': finding_dict['found_at'],
+                        'scan_type': finding_dict['scan_type'],
+                        # NOW SHOW THE ACTUAL SECRET VALUES
+                        'raw': actual_secret,
+                        'secret': actual_secret,
+                        'secret_display': actual_secret,
+                        'redacted': actual_secret,  # Show actual secret instead of redacted
+                        # Use the calculated baseline status from SQL query
+                        'baseline_status': finding_dict['baseline_status']
+                    }
+                    
+                    findings.append(finding)
+                
+                logger.info(f"Loaded {len(findings)} findings from database with actual secret values")
+                
+                # Debug: Log baseline status distribution
+                baseline_counts = {}
+                for f in findings:
+                    status = f['baseline_status']
+                    baseline_counts[status] = baseline_counts.get(status, 0) + 1
+                logger.info(f"Baseline status distribution: {baseline_counts}")
+                
+        except Exception as e:
+            logger.error(f"Error loading findings from database: {e}")
+            logger.exception(e)
+        
+        return findings
+    
+    def _load_validation_results_from_db(self, scan_run_id: int = None) -> Dict[str, Any]:
+        """
+        Load validation results summary from database
+        
+        Args:
+            scan_run_id: Scan run ID
+            
+        Returns:
+            Validation results summary
+        """
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get validation summary
+                query = """
+                    SELECT 
+                        COUNT(DISTINCT f.id) as total_findings,
+                        COUNT(DISTINCT CASE WHEN f.validation_status = 'completed' THEN f.id END) as validated,
+                        COUNT(DISTINCT CASE WHEN json_extract(f.validation_result, '$.valid') = 1 THEN f.id END) as valid_secrets,
+                        COUNT(DISTINCT CASE WHEN json_extract(f.validation_result, '$.valid') = 0 THEN f.id END) as invalid_secrets,
+                        COUNT(DISTINCT CASE WHEN f.validation_status = 'error' THEN f.id END) as validation_errors
+                    FROM findings f
+                    WHERE 1=1
+                """
+                
+                params = []
+                if scan_run_id:
+                    query += " AND f.scan_run_id = ?"
+                    params.append(scan_run_id)
+                
+                cursor.execute(query, params)
+                row = cursor.fetchone()
+                
+                if row:
+                    return {
+                        'summary': {
+                            'total_findings': row[0],
+                            'validated': row[1],
+                            'valid_secrets': row[2],
+                            'invalid_secrets': row[3],
+                            'validation_errors': row[4]
+                        }
+                    }
+                
+        except Exception as e:
+            logger.error(f"Error loading validation results: {e}")
+        
+        return {}
+    
+    def _load_comparison_data(self, current_scan_id: int, previous_scan_id: int) -> Dict[str, Any]:
+        """
+        Load comparison data between two scans
+        
+        Args:
+            current_scan_id: Current scan ID
+            previous_scan_id: Previous scan ID for comparison
+            
+        Returns:
+            Comparison data with new, recurring, and resolved findings
+        """
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get new findings (in current but not in previous)
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT s.secret_hash) as new_count
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    WHERE f.scan_run_id = ?
+                    AND s.secret_hash NOT IN (
+                        SELECT DISTINCT s2.secret_hash
+                        FROM findings f2
+                        JOIN secrets s2 ON f2.secret_id = s2.id
+                        WHERE f2.scan_run_id = ?
+                    )
+                """, (current_scan_id, previous_scan_id))
+                
+                new_count = cursor.fetchone()[0]
+                
+                # Get recurring findings (in both scans)
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT s.secret_hash) as recurring_count
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    WHERE f.scan_run_id = ?
+                    AND s.secret_hash IN (
+                        SELECT DISTINCT s2.secret_hash
+                        FROM findings f2
+                        JOIN secrets s2 ON f2.secret_id = s2.id
+                        WHERE f2.scan_run_id = ?
+                    )
+                """, (current_scan_id, previous_scan_id))
+                
+                recurring_count = cursor.fetchone()[0]
+                
+                # Get resolved findings (in previous but not in current)
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT s.secret_hash) as resolved_count
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    WHERE f.scan_run_id = ?
+                    AND s.secret_hash NOT IN (
+                        SELECT DISTINCT s2.secret_hash
+                        FROM findings f2
+                        JOIN secrets s2 ON f2.secret_id = s2.id
+                        WHERE f2.scan_run_id = ?
+                    )
+                """, (previous_scan_id, current_scan_id))
+                
+                resolved_count = cursor.fetchone()[0]
+                
+                return {
+                    'new': list(range(new_count)),  # Placeholder for compatibility
+                    'recurring': list(range(recurring_count)),
+                    'resolved': list(range(resolved_count)),
+                    'new_count': new_count,
+                    'recurring_count': recurring_count,
+                    'resolved_count': resolved_count
+                }
+                
+        except Exception as e:
+            logger.error(f"Error loading comparison data: {e}")
+            return {
+                'new': [],
+                'recurring': [],
+                'resolved': []
+            }
+    
+    def _calculate_statistics_from_db(self, scan_run_id: int = None, domains: List[str] = None) -> Dict[str, Any]:
+        """
+        Calculate statistics using database queries
+        
+        Args:
+            scan_run_id: Filter by scan run
+            domains: Filter by domains
+            
+        Returns:
+            Statistics dictionary
+        """
+        stats = {
+            'total': 0,
+            'by_type': {},
+            'by_severity': {},
+            'by_tool': {},
+            'verified': 0,
+            'critical_count': 0,
+            'high_count': 0,
+            'unique_files': 0,
+            'unique_urls': 0,
+            'total_raw_findings': 0,
+            'total_unique_secrets': 0,
+            'deduplication_ratio': '0%'
+        }
+        
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Base query conditions
+                base_conditions = " WHERE 1=1"
+                params = []
+                
+                if scan_run_id:
+                    base_conditions += " AND f.scan_run_id = ?"
+                    params.append(scan_run_id)
+                
+                if domains:
+                    placeholders = ','.join(['?' for _ in domains])
+                    base_conditions += f" AND u.domain IN ({placeholders})"
+                    params.extend(domains)
+                
+                # Total findings and unique secrets
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(DISTINCT f.id) as total_findings,
+                        COUNT(DISTINCT s.id) as unique_secrets
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                """, params)
+                
+                row = cursor.fetchone()
+                if row:
+                    stats['total_raw_findings'] = row[0]
+                    stats['total_unique_secrets'] = row[1]
+                    stats['total'] = row[1]  # For backward compatibility
+                    
+                    if row[0] > 0:
+                        dedup_ratio = (1 - row[1]/row[0]) * 100
+                        stats['deduplication_ratio'] = f"{dedup_ratio:.1f}%"
+                
+                # By type
+                cursor.execute(f"""
+                    SELECT s.secret_type, COUNT(DISTINCT s.id)
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                    GROUP BY s.secret_type
+                """, params)
+                
+                for row in cursor.fetchall():
+                    stats['by_type'][row[0]] = row[1]
+                
+                # By severity
+                cursor.execute(f"""
+                    SELECT 
+                        s.severity,
+                        COUNT(DISTINCT s.id),
+                        SUM(CASE WHEN s.severity = 'critical' THEN 1 ELSE 0 END) as critical,
+                        SUM(CASE WHEN s.severity = 'high' THEN 1 ELSE 0 END) as high
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                    GROUP BY s.severity
+                """, params)
+                
+                for row in cursor.fetchall():
+                    stats['by_severity'][row[0]] = row[1]
+                    if row[2]:
+                        stats['critical_count'] += row[2]
+                    if row[3]:
+                        stats['high_count'] += row[3]
+                
+                # By tool
+                cursor.execute(f"""
+                    SELECT s.detector_name, COUNT(DISTINCT s.id)
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                    GROUP BY s.detector_name
+                """, params)
+                
+                for row in cursor.fetchall():
+                    stats['by_tool'][row[0]] = row[1]
+                
+                # Verified count
+                cursor.execute(f"""
+                    SELECT COUNT(DISTINCT s.id)
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                    AND s.is_verified = 1
+                """, params)
+                
+                stats['verified'] = cursor.fetchone()[0]
+                
+                # Unique locations
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(DISTINCT f.file_path) as unique_files,
+                        COUNT(DISTINCT u.url) as unique_urls
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    LEFT JOIN urls u ON f.url_id = u.id
+                    {base_conditions}
+                """, params)
+                
+                row = cursor.fetchone()
+                if row:
+                    stats['unique_files'] = row[0]
+                    stats['unique_urls'] = row[1]
+                
+        except Exception as e:
+            logger.error(f"Error calculating statistics from database: {e}")
+        
+        return stats
+    
+    def _store_report_metadata(self, scan_run_id: int, report_path: Path, report_type: str) -> None:
+        """
+        Store report metadata in database
+        
+        Args:
+            scan_run_id: Scan run ID
+            report_path: Path to generated report
+            report_type: Type of report
+        """
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Store report path and metadata
+                cursor.execute("""
+                    UPDATE scan_runs
+                    SET report_path = ?,
+                        report_type = ?,
+                        report_generated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (str(report_path), report_type, scan_run_id))
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error storing report metadata: {e}")
+    
     def generate_report(self, findings: List[Dict[str, Any]], 
-                   report_type: str = 'full',
-                   comparison_data: Optional[Dict[str, Any]] = None,
-                   validation_results: Optional[Dict[str, Any]] = None,
-                    scan_id: Optional[str] = None) -> Path:
+                       report_type: str = 'full',
+                       comparison_data: Optional[Dict[str, Any]] = None,
+                       validation_results: Optional[Dict[str, Any]] = None,
+                       scan_id: Optional[str] = None) -> Path:
         """
         Generate HTML report with optional deduplication
         
@@ -64,15 +555,32 @@ class HTMLReportGenerator:
         try:
             logger.info(f"Generating {report_type} HTML report for {len(findings)} findings")
             
+            # Get enhanced statistics from database if available
+            if self.db and scan_id:
+                try:
+                    scan_run_id = int(scan_id)
+                    db_stats = self._calculate_statistics_from_db(scan_run_id)
+                    # This will provide more accurate statistics
+                except:
+                    db_stats = None
+            else:
+                db_stats = None
+            
             # Prepare report data with or without deduplication
             if self.enable_deduplication:
                 report_data = self._prepare_deduplicated_report_data(
                     findings, report_type, comparison_data, validation_results
                 )
+                # Override with database statistics if available
+                if db_stats:
+                    report_data['statistics'].update(db_stats)
             else:
                 report_data = self._prepare_report_data(
                     findings, report_type, comparison_data, validation_results
                 )
+                # Override with database statistics if available
+                if db_stats:
+                    report_data['statistics'].update(db_stats)
             
             # Add scan_id to report data
             if scan_id:
@@ -99,6 +607,7 @@ class HTMLReportGenerator:
             })
             return None
 
+    # Keep all the existing methods unchanged
     def _save_report(self, html_content: str, report_type: str, scan_id: Optional[str] = None) -> Path:
         """
         Save HTML report to file
@@ -145,9 +654,9 @@ class HTMLReportGenerator:
             if secret_hash not in deduplicated:
                 # Initialize the deduplicated entry
                 deduplicated[secret_hash] = {
-                    'secret': secret_value,
-                    'secret_display': secret_value,  # Full secret
-                    'redacted': finding.get('redacted', self._redact_secret(secret_value)),
+                    'secret': secret_value,  # ACTUAL SECRET VALUE
+                    'secret_display': secret_value,  # ACTUAL SECRET VALUE
+                    'redacted': secret_value,  # SHOW ACTUAL SECRET INSTEAD OF REDACTED
                     'type': finding.get('type', 'unknown'),
                     'severity': finding.get('severity', 'unknown'),
                     'occurrences': [],
@@ -162,8 +671,7 @@ class HTMLReportGenerator:
                     'risk_scores': [],
                     'baseline_status': 'unknown'
                 }
-            
-            # Add this occurrence
+        
             occurrence = {
                 'id': finding.get('id', ''),
                 'file_path': finding.get('file', finding.get('file_path', 'Unknown')),
@@ -292,9 +800,9 @@ class HTMLReportGenerator:
             # Add comparison data if available
             if comparison_data:
                 report_data['comparison'] = {
-                    'new_count': len(comparison_data.get('new', [])),
-                    'recurring_count': len(comparison_data.get('recurring', [])),
-                    'resolved_count': len(comparison_data.get('resolved', []))
+                    'new_count': comparison_data.get('new_count', len(comparison_data.get('new', []))),
+                    'recurring_count': comparison_data.get('recurring_count', len(comparison_data.get('recurring', []))),
+                    'resolved_count': comparison_data.get('resolved_count', len(comparison_data.get('resolved', [])))
                 }
             
             return report_data
@@ -480,6 +988,7 @@ class HTMLReportGenerator:
         
         return charts_data
     
+    # Keep all other existing methods unchanged
     def _prepare_report_data(self, findings: List[Dict[str, Any]], 
                            report_type: str,
                            comparison_data: Optional[Dict[str, Any]],
@@ -536,9 +1045,9 @@ class HTMLReportGenerator:
             # Add comparison data if available
             if comparison_data:
                 report_data['comparison'] = {
-                    'new_count': len(comparison_data.get('new', [])),
-                    'recurring_count': len(comparison_data.get('recurring', [])),
-                    'resolved_count': len(comparison_data.get('resolved', []))
+                    'new_count': comparison_data.get('new_count', len(comparison_data.get('new', []))),
+                    'recurring_count': comparison_data.get('recurring_count', len(comparison_data.get('recurring', []))),
+                    'resolved_count': comparison_data.get('resolved_count', len(comparison_data.get('resolved', [])))
                 }
             
             # Add validation summary if available
@@ -1175,6 +1684,7 @@ class HTMLReportGenerator:
             <div class="subtitle">
                 Enhanced Secret Scanner Results - {{ report_type|title }} Report
                 <br>Generated: {{ generated_at_formatted }}
+                {% if scan_id %}<br>Scan ID: {{ scan_id }}{% endif %}
             </div>
         </div>
     </header>
@@ -1897,6 +2407,7 @@ class HTMLReportGenerator:
             <div class="subtitle">
                 Secret Scanner Results - {{ report_type|title }} Report
                 <br>Generated: {{ generated_at_formatted }}
+                {% if scan_id %}<br>Scan ID: {{ scan_id }}{% endif %}
             </div>
         </div>
     </header>

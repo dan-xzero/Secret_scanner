@@ -1,16 +1,10 @@
-"""
-Secret Scanner Module
-
-This module handles scanning content for secrets using various tools:
-- TruffleHog
-- Gitleaks
-- Custom pattern matching
-"""
+#!/usr/bin/env python3
+"""Scanner Module"""
 
 from .scanner_wrapper import SecretScanner
-from .pattern_manager import PatternManager
-from .result_parser import ResultParser
 
-__all__ = ['SecretScanner', 'PatternManager', 'ResultParser']
+__all__ = ['SecretScanner']
 
-__version__ = '1.0.0'
+def create_scanner(config, db_path=None):
+    """Create scanner with database support"""
+    return SecretScanner(config, db_path)
