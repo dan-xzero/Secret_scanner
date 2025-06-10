@@ -315,6 +315,8 @@ class ContentFetcher:
         
         # Initialize URL mappings BEFORE trying to load from DB
         self.url_filename_map = self._initialize_url_mappings(urls, scan_id)
+        if scan_id:
+            self.scan_run_id = scan_id
         
         # Also try to load any existing mappings from database
         if scan_id:
@@ -671,6 +673,9 @@ class ContentFetcher:
                 '--batch-size', str(self.batch_size),
                 '--headless' if self.headless else '--no-headless'
             ]
+            # Add scan-id if available
+            if self.scan_run_id:
+                cmd.extend(['--scan-id', self.scan_run_id])
             
             if self.logger.level == logging.DEBUG:
                 cmd.append('--verbose')

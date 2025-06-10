@@ -1,13 +1,15 @@
 """
-Enhanced Secret Scanner Wrapper with Database Integration
+Enhanced Secret Scanner Wrapper with Precise URL Mapping and Database Integration
 
 Key improvements:
 1. Database-centric architecture for findings storage
-2. Better tool coordination and parallel execution
-3. Enhanced pattern matching with context
-4. Improved false positive filtering
-5. Better error handling and recovery
-6. Detailed finding metadata with URL mapping from database
+2. Precise URL mapping using resource relationship data from enhanced crawler
+3. Better tool coordination and parallel execution
+4. Enhanced pattern matching with context
+5. Improved false positive filtering
+6. Better error handling and recovery
+7. Detailed finding metadata with exact parent-child URL relationships
+8. FIXED: Enhanced data validation and error handling for database operations
 """
 
 import os
@@ -25,12 +27,689 @@ import hashlib
 import math
 import sqlite3
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
 
 
+class URLNormalizer:
+    """Utility class for URL normalization and matching."""
+    
+    @staticmethod
+    def normalize_url(url: str) -> str:
+        """Normalize URL for consistent comparison."""
+        if not url:
+            return url
+        
+        try:
+            # Parse URL
+            parsed = urlparse(url)
+            
+            # Normalize scheme
+            scheme = parsed.scheme.lower() if parsed.scheme else 'https'
+            
+            # Normalize netloc
+            netloc = parsed.netloc.lower()
+            
+            # Normalize path
+            path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
+            
+            # Reconstruct URL
+            normalized = urlunparse((
+                scheme,
+                netloc,
+                path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+            
+            return normalized
+            
+        except Exception:
+            return url
+    
+    @staticmethod
+    def get_url_variants(url: str) -> List[str]:
+        """Get common variants of a URL for matching."""
+        if not url:
+            return []
+        
+        variants = [url]
+        
+        try:
+            # Add normalized version
+            normalized = URLNormalizer.normalize_url(url)
+            if normalized != url:
+                variants.append(normalized)
+            
+            # Add with/without trailing slash
+            if url.endswith('/'):
+                variants.append(url.rstrip('/'))
+            else:
+                variants.append(url + '/')
+            
+            # Add scheme variants
+            if url.startswith('https://'):
+                variants.append(url.replace('https://', 'http://'))
+            elif url.startswith('http://'):
+                variants.append(url.replace('http://', 'https://'))
+            
+            # Add www variants
+            parsed = urlparse(url)
+            if parsed.netloc:
+                if parsed.netloc.startswith('www.'):
+                    # Remove www
+                    no_www = parsed.netloc[4:]
+                    variants.append(url.replace(parsed.netloc, no_www))
+                else:
+                    # Add www
+                    with_www = 'www.' + parsed.netloc
+                    variants.append(url.replace(parsed.netloc, with_www))
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_variants = []
+            for variant in variants:
+                if variant not in seen:
+                    seen.add(variant)
+                    unique_variants.append(variant)
+            
+            return unique_variants
+            
+        except Exception as e:
+            logger.debug(f"Error generating URL variants for {url}: {e}")
+            return [url]
+
+
+class DataValidator:
+    """Utility class for validating data structures."""
+    
+    @staticmethod
+    def validate_resource_relationship(rel: Dict) -> Tuple[bool, str, Dict]:
+        """
+        Validate resource relationship data structure.
+        
+        Returns:
+            (is_valid, error_message, normalized_data)
+        """
+        if not isinstance(rel, dict):
+            return False, f"Expected dict, got {type(rel)}", {}
+        
+        # Required fields with fallbacks
+        required_fields = {
+            'parentUrl': None,
+            'url': None,
+            'filename': None,
+            'resourceType': 'unknown',
+            'loadMethod': 'unknown',
+            'loadTime': 0,
+            'timestamp': None
+        }
+        
+        normalized = {}
+        errors = []
+        
+        for field, default in required_fields.items():
+            if field in rel:
+                value = rel[field]
+                
+                # Type validation and normalization
+                if field in ['loadTime']:
+                    try:
+                        normalized[field] = int(value) if value is not None else 0
+                    except (ValueError, TypeError):
+                        normalized[field] = 0
+                        errors.append(f"Invalid {field}: {value}")
+                
+                elif field in ['parentUrl', 'url']:
+                    if isinstance(value, str) and value.strip():
+                        normalized[field] = value.strip()
+                    else:
+                        errors.append(f"Invalid {field}: {value}")
+                        normalized[field] = None
+                
+                elif field == 'filename':
+                    if isinstance(value, str) and value.strip():
+                        normalized[field] = value.strip()
+                    else:
+                        # Try to extract filename from URL
+                        url = rel.get('url', '')
+                        if url:
+                            try:
+                                filename = Path(urlparse(url).path).name
+                                normalized[field] = filename if filename else 'unknown'
+                            except:
+                                normalized[field] = 'unknown'
+                        else:
+                            normalized[field] = 'unknown'
+                
+                else:
+                    normalized[field] = value if value is not None else default
+            else:
+                if default is not None:
+                    normalized[field] = default
+                else:
+                    errors.append(f"Missing required field: {field}")
+        
+        # Additional validation
+        if not normalized.get('parentUrl'):
+            errors.append("parentUrl is required")
+        
+        if not normalized.get('url'):
+            errors.append("url is required")
+        
+        # Set timestamp if missing
+        if not normalized.get('timestamp'):
+            normalized['timestamp'] = datetime.now().isoformat()
+        
+        is_valid = len(errors) == 0
+        error_message = "; ".join(errors) if errors else ""
+        
+        return is_valid, error_message, normalized
+    
+    @staticmethod
+    def validate_finding_data(finding: Dict) -> Tuple[bool, str, Dict]:
+        """
+        Validate finding data structure.
+        
+        Returns:
+            (is_valid, error_message, normalized_data)
+        """
+        if not isinstance(finding, dict):
+            return False, f"Expected dict, got {type(finding)}", {}
+        
+        # Required fields with fallbacks
+        required_fields = {
+            'raw': '',
+            'type': 'unknown',
+            'detector': 'unknown',
+            'file': '',
+            'line': 0,
+            'confidence': 'medium',
+            'severity': 'medium',
+            'verified': False
+        }
+        
+        normalized = {}
+        errors = []
+        
+        for field, default in required_fields.items():
+            value = finding.get(field, default)
+            
+            # Type validation and normalization
+            if field == 'line':
+                try:
+                    normalized[field] = int(value) if value is not None else 0
+                except (ValueError, TypeError):
+                    normalized[field] = 0
+            
+            elif field == 'verified':
+                normalized[field] = bool(value) if value is not None else False
+            
+            elif field in ['confidence', 'severity']:
+                if isinstance(value, str) and value.lower() in ['low', 'medium', 'high', 'critical']:
+                    normalized[field] = value.lower()
+                else:
+                    normalized[field] = default
+            
+            else:
+                normalized[field] = str(value) if value is not None else default
+        
+        # Validate file path
+        if not normalized.get('file'):
+            errors.append("file path is required")
+        
+        # Validate raw secret
+        if not normalized.get('raw'):
+            errors.append("raw secret value is required")
+        
+        is_valid = len(errors) == 0
+        error_message = "; ".join(errors) if errors else ""
+        
+        return is_valid, error_message, normalized
+
+
+class PreciseURLMapper:
+    """Enhanced URL mapper using resource relationship data from crawler."""
+    
+    def __init__(self, db_manager, scan_id: str, logger=None):
+        self.db = db_manager
+        self.scan_id = scan_id
+        self.logger = logger
+        self.resource_cache = {}
+        self.resource_relationships = []
+        
+        # Load resource relationships from enhanced crawler
+        self._load_resource_relationships()
+    
+    def _load_resource_relationships(self):
+        """Load resource relationships from crawler output and database."""
+        self.logger.debug(f"🔍 _load_resource_relationships called")
+        self.logger.debug(f"🔍 scan_id: {self.scan_id}")
+        
+        try:
+            # Load from resource_relationships.json if available
+            data_path = Path(f"./data/content/{self.scan_id}")
+            resource_file = data_path / "resource_relationships.json"
+            
+            self.logger.debug(f"🔍 Looking for file: {resource_file}")
+            self.logger.debug(f"🔍 File exists: {resource_file.exists()}")
+            
+            if resource_file.exists():
+                # Check file size
+                file_size = resource_file.stat().st_size
+                self.logger.debug(f"🔍 File size: {file_size} bytes")
+                
+                with open(resource_file, 'r') as f:
+                    data = json.load(f)
+                    
+                self.logger.debug(f"🔍 JSON loaded successfully, type: {type(data)}")
+                
+                raw_relationships = data.get('relationships', [])
+                self.logger.debug(f"🔍 Raw relationships extracted: {len(raw_relationships)} items")
+                
+                # Validate each relationship
+                validated_relationships = []
+                validation_errors = 0
+                
+                for i, rel in enumerate(raw_relationships):
+                    is_valid, error_msg, normalized = DataValidator.validate_resource_relationship(rel)
+                    if is_valid:
+                        validated_relationships.append(normalized)
+                    else:
+                        validation_errors += 1
+                        if validation_errors <= 3:  # Log first 3 errors only
+                            self.logger.debug(f"🔍 Validation failed for item {i}: {error_msg}")
+                            
+                self.logger.debug(f"🔍 Validation complete: {len(validated_relationships)} valid, {validation_errors} invalid")
+                
+                # THIS IS THE CRITICAL LINE - check if it's actually setting the array
+                self.resource_relationships = validated_relationships
+                self.logger.debug(f"🔍 Set self.resource_relationships to {len(self.resource_relationships)} items")
+                
+                # Verify the array is actually set
+                if hasattr(self, 'resource_relationships'):
+                    self.logger.debug(f"🔍 Confirmed: self.resource_relationships has {len(self.resource_relationships)} items")
+                    
+                    # Show first relationship for verification
+                    if self.resource_relationships:
+                        first_rel = self.resource_relationships[0]
+                        self.logger.debug(f"🔍 First relationship filename: {first_rel.get('filename', 'NO_FILENAME')}")
+                else:
+                    self.logger.debug(f"❌ self.resource_relationships not set!")
+                    
+                self.logger.info(f"Loaded {len(self.resource_relationships)} valid resource relationships from crawler")
+                
+            else:
+                self.logger.debug(f"🔍 File not found: {resource_file}")
+                # Initialize empty array if file doesn't exist
+                self.resource_relationships = []
+                
+            # Store relationships in database for future use
+            self.logger.debug(f"🔍 About to call _store_resource_relationships")
+            self._store_resource_relationships()
+            self.logger.debug(f"🔍 _store_resource_relationships completed")
+            
+            # Final verification
+            self.logger.debug(f"🔍 Final array length: {len(getattr(self, 'resource_relationships', []))}")
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"❌ JSON decode error: {e}")
+            self.resource_relationships = []
+        except Exception as e:
+            self.logger.error(f"❌ Exception in _load_resource_relationships: {e}")
+            self.logger.debug(f"❌ Exception type: {type(e).__name__}")
+            import traceback
+            self.logger.debug(f"❌ Traceback: {traceback.format_exc()}")
+            self.resource_relationships = []
+    
+    def _store_resource_relationships(self):
+        """Store resource relationships in page_resources table with enhanced error handling."""
+        if not self.db or not self.resource_relationships:
+            self.logger.debug(f"❌ Skipping store: db={bool(self.db)}, relationships={len(getattr(self, 'resource_relationships', []))}")
+            return
+        
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            stored_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            self.logger.debug(f"🔍 Starting to store {len(self.resource_relationships)} relationships")
+            
+            for i, rel in enumerate(self.resource_relationships):
+                try:
+                    # Validate relationship data
+                    is_valid, error_msg, normalized = DataValidator.validate_resource_relationship(rel)
+                    if not is_valid:
+                        self.logger.debug(f"Skipping invalid relationship {i}: {error_msg}")
+                        skipped_count += 1
+                        continue
+                    
+                    # Get parent URL ID with enhanced matching
+                    parent_url_id = self._find_parent_url_id(cursor, normalized['parentUrl'])
+                    
+                    if not parent_url_id:
+                        self.logger.debug(f"Parent URL not found, creating: {normalized['parentUrl']}")
+                        # 🔧 FIX: Create parent URL entry if it doesn't exist
+                        try:
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO urls (url, scan_id, domain, file_name, file_path, crawled_at)
+                                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            """, (
+                                normalized['parentUrl'],
+                                self.scan_id,
+                                self._extract_domain(normalized['parentUrl']),
+                                '',  # No file name for parent URL
+                                normalized['parentUrl']
+                            ))
+                            
+                            # Try to get the ID again
+                            parent_url_id = self._find_parent_url_id(cursor, normalized['parentUrl'])
+                            if parent_url_id:
+                                self.logger.debug(f"✅ Created parent URL entry: {normalized['parentUrl']}")
+                            else:
+                                self.logger.warning(f"❌ Failed to create parent URL: {normalized['parentUrl']}")
+                                skipped_count += 1
+                                continue
+                        except Exception as e:
+                            self.logger.debug(f"Failed to create parent URL entry: {e}")
+                            skipped_count += 1
+                            continue
+                    
+                    # Insert or update resource relationship
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO page_resources (
+                            parent_url_id, resource_url, resource_filename, 
+                            resource_type, load_method, load_timing_ms,
+                            referrer_url, first_seen, scan_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        parent_url_id,
+                        normalized['url'],
+                        normalized['filename'],
+                        normalized['resourceType'],
+                        normalized['loadMethod'],
+                        normalized['loadTime'],
+                        normalized.get('referrer', normalized['parentUrl']),
+                        normalized['timestamp'],
+                        self.scan_id
+                    ))
+                    
+                    stored_count += 1
+                    
+                    if i < 3:  # Log first 3 for debugging
+                        self.logger.debug(f"✅ Stored relationship {i}: {normalized['filename']} -> {normalized['url']}")
+                    
+                except sqlite3.Error as e:
+                    self.logger.error(f"Database error storing resource relationship {i}: {e}")
+                    error_count += 1
+                    continue
+                except Exception as e:
+                    self.logger.debug(f"Failed to store resource relationship {i}: {e}")
+                    error_count += 1
+                    continue
+            
+            conn.commit()
+            self.logger.info(f"✅ Resource relationships stored: {stored_count} success, {skipped_count} skipped, {error_count} errors")
+            
+            # 🔧 VERIFICATION: Check what was actually stored
+            cursor.execute("""
+                SELECT COUNT(*), MIN(resource_filename), MAX(resource_filename)
+                FROM page_resources 
+                WHERE scan_id = ?
+            """, (self.scan_id,))
+            
+            result = cursor.fetchone()
+            if result and result[0] > 0:
+                self.logger.info(f"🔍 Database verification: {result[0]} resources stored. Sample: {result[1]} to {result[2]}")
+            else:
+                self.logger.error(f"❌ Database verification failed: No resources found for scan_id {self.scan_id}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to store resource relationships: {e}")
+            import traceback
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return parsed.netloc or 'unknown'
+        except:
+            return 'unknown'
+    
+    def _find_parent_url_id(self, cursor, parent_url: str) -> Optional[int]:
+        """Find parent URL ID with enhanced matching and better debugging."""
+        if not parent_url:
+            return None
+        
+        # Method 1: Exact match
+        cursor.execute("""
+            SELECT id FROM urls WHERE url = ? AND scan_id = ?
+        """, (parent_url, self.scan_id))
+        
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+        
+        # Method 2: Try URL variants
+        url_variants = URLNormalizer.get_url_variants(parent_url)
+        
+        for variant in url_variants:
+            cursor.execute("""
+                SELECT id FROM urls WHERE url = ? AND scan_id = ?
+            """, (variant, self.scan_id))
+            
+            result = cursor.fetchone()
+            if result:
+                self.logger.debug(f"Found parent URL via variant: {parent_url} -> {variant}")
+                return result[0]
+        
+        # Method 3: Debug what URLs we actually have
+        cursor.execute("""
+            SELECT COUNT(*), MIN(url) as sample_url 
+            FROM urls 
+            WHERE scan_id = ?
+        """, (self.scan_id,))
+        
+        debug_result = cursor.fetchone()
+        if debug_result and debug_result[0] > 0:
+            self.logger.debug(f"⚠️ Parent URL '{parent_url}' not found. Scan has {debug_result[0]} URLs. Sample: {debug_result[1]}")
+        else:
+            self.logger.error(f"❌ Scan {self.scan_id} has NO URLs in database!")
+        
+        return None
+    
+    def get_precise_url_for_file(self, filename: str) -> Optional[Dict]:
+        """Enhanced debug version to identify the exact issue"""
+        
+        # 🔍 STEP 1: Log method entry and parameters
+        self.logger.debug(f"🔍 METHOD CALLED with filename: '{filename}' (len={len(filename)})")
+        self.logger.debug(f"🔍 Filename repr: {repr(filename)}")
+        self.logger.debug(f"🔍 Array length: {len(self.resource_relationships)}")
+        
+        # 🔍 STEP 2: Check if array is actually populated
+        if not self.resource_relationships:
+            self.logger.debug(f"❌ resource_relationships array is EMPTY!")
+            return None
+            
+        # 🔍 STEP 3: Log first few entries for comparison
+        self.logger.debug(f"🔍 First 3 filenames in array:")
+        for i, rel in enumerate(self.resource_relationships[:3]):
+            stored_filename = rel.get('filename', 'NO_FILENAME_KEY')
+            self.logger.debug(f"   [{i}]: '{stored_filename}' (len={len(stored_filename)})")
+            self.logger.debug(f"   [{i}]: repr: {repr(stored_filename)}")
+        
+        # Method 1: Check in-memory resource relationships from crawler
+        self.logger.debug(f"🔍 Starting Method 1: In-memory search...")
+        exact_matches = []
+        partial_matches = []
+        
+        for i, rel in enumerate(self.resource_relationships):
+            stored_filename = rel.get('filename')
+            if not stored_filename:
+                continue
+                
+            # 🔍 STEP 4: Detailed comparison logging
+            if i < 5:  # Log first 5 for detailed analysis
+                self.logger.debug(f"🔍 Comparing [{i}]:")
+                self.logger.debug(f"   Target: '{filename}'")
+                self.logger.debug(f"   Stored: '{stored_filename}'")
+                self.logger.debug(f"   Equal: {stored_filename == filename}")
+                self.logger.debug(f"   Target in Stored: {filename in stored_filename}")
+                self.logger.debug(f"   Stored in Target: {stored_filename in filename}")
+            
+            # Exact match
+            if stored_filename == filename:
+                exact_matches.append((i, rel))
+                self.logger.debug(f"✅ EXACT MATCH FOUND at index {i}")
+                
+            # Partial matches for debugging
+            elif filename in stored_filename or stored_filename in filename:
+                partial_matches.append((i, rel, stored_filename))
+        
+        # 🔍 STEP 5: Report findings
+        self.logger.debug(f"🔍 Method 1 Results:")
+        self.logger.debug(f"   Exact matches: {len(exact_matches)}")
+        self.logger.debug(f"   Partial matches: {len(partial_matches)}")
+        
+        if exact_matches:
+            # Return first exact match
+            _, rel = exact_matches[0]
+            
+            # 🔢 FORCE COUNTER INCREMENT - ensure stats exist
+            if not hasattr(self, "stats"):
+                self.stats = {"precise_mappings_used": 0}
+            if "precise_mappings_used" not in self.stats:
+                self.stats["precise_mappings_used"] = 0
+                
+            self.stats["precise_mappings_used"] += 1
+            self.logger.debug(f"🔢 COUNTER INCREMENTED to {self.stats['precise_mappings_used']}")
+            
+            self.logger.debug(f"✅ RETURNING exact match: {rel}")
+            return {
+            'url': rel.get('url'),              # ✅ FIX: Use actual JS URL
+            'resource_url': rel.get('url'),     # Keep this too
+            'parent_url': rel.get('parentUrl'), # Move parent URL here
+            'load_method': rel.get('loadMethod'),
+            'load_timing_ms': rel.get('loadTime', 0),
+            'referrer_url': rel.get('parentUrl'),
+            'first_seen': rel.get('timestamp'),
+            'precision': 'exact',
+            'source': 'memory'
+        }
+        
+        # 🔍 STEP 6: Log partial matches for analysis
+        if partial_matches:
+            self.logger.debug(f"🔍 Found {len(partial_matches)} partial matches:")
+            for i, (idx, rel, stored_name) in enumerate(partial_matches[:3]):
+                self.logger.debug(f"   Partial[{i}]: '{stored_name}' at index {idx}")
+        
+        # Method 2: Query database for stored relationships
+        self.logger.debug(f"🔍 Starting Method 2: Database search...")
+        if self.db:
+            try:
+                with self.db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT u.url as parent_url, pr.resource_url, pr.load_method,
+                            pr.load_timing_ms, pr.referrer_url, pr.first_seen
+                        FROM page_resources pr
+                        JOIN urls u ON pr.parent_url_id = u.id
+                        WHERE pr.resource_filename = ? AND pr.scan_id = ?
+                        ORDER BY pr.first_seen DESC LIMIT 1
+                    """, (filename, self.scan_id))
+                    
+                    result = cursor.fetchone()
+                    if result:
+                        self.logger.debug(f"✅ Found precise mapping in database for {filename}")
+                        return {
+                            'url': result[0],
+                            'resource_url': result[1],
+                            'load_method': result[2],
+                            'load_timing_ms': result[3],
+                            'referrer_url': result[4],
+                            'first_seen': result[5],
+                            'precision': 'exact',
+                            'source': 'database'
+                        }
+                    else:
+                        self.logger.debug(f"❌ No database record found for filename: '{filename}'")
+                        
+            except Exception as e:
+                self.logger.debug(f"❌ Database lookup failed for {filename}: {e}")
+        else:
+            self.logger.debug(f"❌ No database connection available")
+        
+        # 🔍 STEP 7: Final failure analysis
+        self.logger.debug(f"❌ NO PRECISE MAPPING FOUND for '{filename}'")
+        self.logger.debug(f"❌ Checked {len(self.resource_relationships)} relationships")
+        self.logger.debug(f"❌ Target filename: {repr(filename)}")
+        
+        return None
+    
+    def store_js_chunk_metadata(self, filename: str, parent_url: str, metadata: Dict):
+        """Store JavaScript chunk metadata in database."""
+        if not self.db:
+            return
+        
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # Get parent URL ID
+            parent_url_id = self._find_parent_url_id(cursor, parent_url)
+            if not parent_url_id:
+                self.logger.debug(f"Parent URL not found for JS metadata: {parent_url}")
+                return
+            
+            # Validate metadata
+            safe_metadata = {
+            'hash': str(metadata.get('hash', '')),
+            'webpack_chunk_id': str(metadata.get('webpack_chunk_id', '')),
+            'source_map_url': str(metadata.get('source_map_url', '')),
+            'entry_point': bool(metadata.get('entry_point', False)),
+            'size': int(metadata.get('size', 0)) if isinstance(metadata.get('size'), (int, float)) else 0,
+            'load_order': int(metadata.get('load_order', 0)) if isinstance(metadata.get('load_order'), (int, float)) else 0,
+            'dependencies': metadata.get('dependencies', []),
+            'load_context': metadata.get('load_context', {})
+        }
+            
+            # Insert chunk metadata
+            cursor.execute("""
+                INSERT OR REPLACE INTO js_chunk_metadata (
+                    chunk_filename, parent_page_url_id, chunk_hash,
+                    webpack_chunk_id, source_map_url, entry_point,
+                    chunk_size_bytes, load_order, dependencies, scan_id, load_context
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                filename,
+                parent_url_id,
+                safe_metadata['hash'],
+                safe_metadata['webpack_chunk_id'],
+                safe_metadata['source_map_url'],
+                safe_metadata['entry_point'],
+                safe_metadata['size'],
+                safe_metadata['load_order'],
+                json.dumps(safe_metadata['dependencies']),
+                self.scan_id,
+                json.dumps(safe_metadata["load_context"])
+            ))
+            
+            conn.commit()
+            self.logger.debug(f"Stored JS chunk metadata for {filename}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to store JS chunk metadata: {e}")
+
+
 class SecretScanner:
-    """Enhanced secret scanner orchestrating multiple tools with database integration."""
+    """Enhanced secret scanner orchestrating multiple tools with precise URL mapping."""
     
     def __init__(self, config: Dict, db_manager=None, logger=None):
         """
@@ -83,6 +762,9 @@ class SecretScanner:
         # Current scan run ID (set during scan)
         self.current_scan_run_id = None
         
+        # Precise URL mapper (initialized during scan)
+        self.precise_url_mapper = None
+        
         # Statistics (will be stored in database)
         self.stats = {
             'files_scanned': 0,
@@ -92,7 +774,9 @@ class SecretScanner:
             'scan_duration': 0,
             'tool_results': defaultdict(int),
             'secret_types': defaultdict(int),
-            'errors': []
+            'errors': [],
+            'precise_mappings_used': 0,
+            'fallback_mappings_used': 0
         }
     
     def _validate_tools(self):
@@ -259,30 +943,33 @@ class SecretScanner:
         return patterns
     
     def _get_url_for_file(self, file_path: str, base_directory: str) -> Optional[str]:
-        """Get URL for a file from the database with improved JS chunk mapping."""
+        """Get URL for a file using precise mapping when available, with enhanced fallback."""
         if not self.db:
             return None
 
         try:
-            # Get the scan_id from the base directory or use the current scan run ID
-            if self.current_scan_run_id:
-                scan_id = self.current_scan_run_id
-            else:
-                # base_directory is like: data/content/scan_20250608_192410_46045
-                scan_id = Path(base_directory).name
-
-            # Get just the filename
             filename = Path(file_path).name
             
-            # Skip metadata files - they don't have corresponding URLs
+            # Skip metadata files
             if filename.endswith('_meta.json'):
-                logger.debug(f"Skipping metadata file: {filename}")
                 return None
-
+            
+            # Method 1: Use precise URL mapper if available (HIGHEST PRIORITY)
+            if self.precise_url_mapper:
+                precise_mapping = self.precise_url_mapper.get_precise_url_for_file(filename)
+                if precise_mapping and precise_mapping.get('url'):
+                    self.stats['precise_mappings_used'] += 1
+                    self.logger.info(f"✓ PRECISE mapping: {filename} -> {precise_mapping['url']} "
+                                    f"(loaded via {precise_mapping['load_method']} in {precise_mapping['load_timing_ms']}ms)")
+                    return precise_mapping['url']
+            
+            # Method 2: Fallback to existing aggressive mapping logic
+            self.stats['fallback_mappings_used'] += 1
+            scan_id = self.current_scan_run_id or Path(base_directory).name
             conn = self.db.get_connection()
             cursor = conn.cursor()
             
-            # Method 1: Direct filename match
+            # Direct filename match
             cursor.execute("""
                 SELECT url FROM urls 
                 WHERE scan_id = ? AND file_name = ?
@@ -291,10 +978,10 @@ class SecretScanner:
             
             result = cursor.fetchone()
             if result:
-                logger.debug(f"✓ Direct filename match: {filename} -> {result[0]}")
+                self.logger.debug(f"✓ Direct filename match: {filename} -> {result[0]}")
                 return result[0]
             
-            # Method 2: File path contains filename
+            # File path contains filename
             cursor.execute("""
                 SELECT url FROM urls 
                 WHERE scan_id = ? AND file_path LIKE ?
@@ -303,17 +990,14 @@ class SecretScanner:
             
             result = cursor.fetchone()
             if result:
-                logger.debug(f"✓ File path match: {filename} -> {result[0]}")
+                self.logger.debug(f"✓ File path match: {filename} -> {result[0]}")
                 return result[0]
             
-            # Method 3: AGGRESSIVE MAPPING FOR JS CHUNKS
-            # For files like: 6436-337f484bdaef3a28_f173daa2.js
+            # AGGRESSIVE MAPPING FOR JS CHUNKS
             if '.js' in filename or filename.endswith('.js'):
-                logger.debug(f"🔍 Attempting JS chunk mapping for: {filename}")
+                self.logger.debug(f"🔍 Attempting JS chunk mapping for: {filename}")
                 
-                # Strategy A: Find the most likely parent page based on domain patterns
-                
-                # First, try to find checkout.quince.com URLs since many JS chunks seem related to checkout
+                # Strategy A: Find checkout-related URLs for checkout-related files
                 if any(term in filename.lower() for term in ['checkout', 'session', 'payment', 'pay']):
                     cursor.execute("""
                         SELECT url FROM urls 
@@ -333,7 +1017,7 @@ class SecretScanner:
                     
                     result = cursor.fetchone()
                     if result:
-                        logger.info(f"✓ JS chunk mapped to checkout domain: {filename} -> {result[0]}")
+                        self.logger.info(f"✓ JS chunk mapped to checkout domain: {filename} -> {result[0]}")
                         return result[0]
                 
                 # Strategy B: Find main domain pages (like quince.com)
@@ -359,10 +1043,10 @@ class SecretScanner:
                 
                 result = cursor.fetchone()
                 if result:
-                    logger.info(f"✓ JS chunk mapped to main domain: {filename} -> {result[0]}")
+                    self.logger.info(f"✓ JS chunk mapped to main domain: {filename} -> {result[0]}")
                     return result[0]
                 
-                # Strategy C: Map to any HTML page as final fallback
+                # Strategy C: Map to any HTML page as fallback
                 cursor.execute("""
                     SELECT url FROM urls 
                     WHERE scan_id = ? 
@@ -384,7 +1068,7 @@ class SecretScanner:
                 
                 result = cursor.fetchone()
                 if result:
-                    logger.warning(f"⚠️ JS chunk mapped to fallback HTML: {filename} -> {result[0]}")
+                    self.logger.warning(f"⚠️ JS chunk mapped to fallback HTML: {filename} -> {result[0]}")
                     return result[0]
                 
                 # Strategy D: ABSOLUTE LAST RESORT - use ANY URL from this scan
@@ -403,7 +1087,7 @@ class SecretScanner:
                 
                 result = cursor.fetchone()
                 if result:
-                    logger.error(f"🚨 JS chunk mapped to LAST RESORT URL: {filename} -> {result[0]}")
+                    self.logger.error(f"🚨 JS chunk mapped to LAST RESORT URL: {filename} -> {result[0]}")
                     return result[0]
             
             # Method 4: For non-JS files, try pattern matching
@@ -427,11 +1111,11 @@ class SecretScanner:
                     
                     result = cursor.fetchone()
                     if result:
-                        logger.debug(f"✓ Pattern match for non-JS: {filename} -> {result[0]}")
+                        self.logger.debug(f"✓ Pattern match for non-JS: {filename} -> {result[0]}")
                         return result[0]
             
             # If we still haven't found a URL, log detailed info for debugging
-            logger.warning(f"❌ NO URL MAPPING FOUND for file: {filename}")
+            self.logger.warning(f"❌ NO URL MAPPING FOUND for file: {filename}")
             
             # Debug: Show what URLs we DO have in this scan
             cursor.execute("""
@@ -441,19 +1125,19 @@ class SecretScanner:
             """, (scan_id,))
             debug_result = cursor.fetchone()
             if debug_result and debug_result[0] > 0:
-                logger.warning(f"Debug: Scan {scan_id} has {debug_result[0]} URLs. Sample: {debug_result[1]}")
+                self.logger.warning(f"Debug: Scan {scan_id} has {debug_result[0]} URLs. Sample: {debug_result[1]}")
             else:
-                logger.error(f"Debug: Scan {scan_id} has NO URLs in database!")
+                self.logger.error(f"Debug: Scan {scan_id} has NO URLs in database!")
             
             return None
                     
         except Exception as e:
-            logger.error(f"Failed to get URL for file {file_path}: {e}")
+            self.logger.error(f"Failed to get URL for file {file_path}: {e}")
             return None
     
     def scan_directory(self, directory: str, scan_type: str = 'full', scan_run_id: str = None) -> int:
         """
-        Scan a directory for secrets using all enabled tools.
+        Scan a directory for secrets using all enabled tools with precise URL mapping.
         
         Args:
             directory: Path to directory to scan
@@ -472,6 +1156,15 @@ class SecretScanner:
         
         # Set current scan run ID
         self.current_scan_run_id = scan_run_id
+        
+        # Initialize precise URL mapper if database available
+        if self.db and scan_run_id:
+            self.precise_url_mapper = PreciseURLMapper(self.db, scan_run_id, self.logger)            
+            self.precise_url_mapper._load_resource_relationships()
+            self.logger.info("✓ Precise URL mapper initialized")
+            self.logger.info(f"Loaded {len(self.precise_url_mapper.resource_relationships)} valid resource relationships from crawler")
+        else:
+            self.logger.warning("Database not available - precise URL mapping disabled")
         
         # Count and filter files to scan
         files_to_scan = self._get_files_to_scan(dir_path, scan_type)
@@ -530,7 +1223,7 @@ class SecretScanner:
         unique_findings = self._deduplicate_findings(all_findings)
         filtered_findings = self._filter_false_positives(unique_findings)
         
-        # Store findings in database
+        # Store findings in database with precise URL mapping
         stored_count = self._store_findings_in_database(filtered_findings, directory)
         
         self.stats['secrets_found'] = stored_count
@@ -539,6 +1232,13 @@ class SecretScanner:
         
         # Update scan statistics in database
         self._update_scan_statistics()
+        
+        # Log mapping statistics
+        if self.precise_url_mapper:
+            self.logger.info(
+                f"URL Mapping: {self.stats['precise_mappings_used']} precise, "
+                f"{self.stats['fallback_mappings_used']} fallback"
+            )
         
         self.logger.info(
             f"Scan completed in {self.stats['scan_duration']:.2f}s. "
@@ -549,7 +1249,7 @@ class SecretScanner:
         return stored_count
     
     def _store_findings_in_database(self, findings: List[Dict], base_directory: str) -> int:
-        """Store findings in database with deduplication."""
+        """Store findings in database with precise URL mapping and enhanced error handling."""
         if not self.db or not findings:
             return 0
         
@@ -561,15 +1261,50 @@ class SecretScanner:
             
             for finding in findings:
                 try:
-                    # Get URL for the file
-                    url = self._get_url_for_file(finding['file'], base_directory)
+                    # Validate finding data first
+                    is_valid, error_msg, normalized_finding = DataValidator.validate_finding_data(finding)
+                    if not is_valid:
+                        self.logger.debug(f"Skipping invalid finding: {error_msg}")
+                        continue
+                    
+                    # Enhanced URL mapping with context
+                    url_context = None
+                    url = None
+                    
+                    if self.precise_url_mapper:
+                        # Use _get_url_for_file to ensure counter increments
+                        url = self._get_url_for_file(normalized_finding['file'], base_directory)
+                        
+                        if url:
+                            # Get full mapping details for database storage
+                            filename = Path(normalized_finding['file']).name
+                            precise_mapping = self.precise_url_mapper.get_precise_url_for_file(filename)
+                            url_context = {
+                                'load_method': precise_mapping['load_method'],
+                                'load_timing_ms': precise_mapping['load_timing_ms'],
+                                'referrer_url': precise_mapping.get('referrer_url'),
+                                'resource_url': precise_mapping.get('resource_url'),
+                                'precision_level': 'exact',
+                                'mapping_source': precise_mapping.get('source', 'unknown')
+                            }
+                            self.logger.debug(f"Using precise mapping for finding in {filename}")
+                        else:
+                            # url = self._get_url_for_file(normalized_finding['file'], base_directory)
+                            url_context = {'precision_level': 'fallback'}
+                    else:
+                        url = self._get_url_for_file(normalized_finding['file'], base_directory)
+                        url_context = {'precision_level': 'legacy'}
                     
                     # Log URL mapping for debugging
                     if not url:
-                        self.logger.debug(f"No URL found for file: {finding['file']}")
+                        self.logger.debug(f"No URL found for file: {normalized_finding['file']}")
                     
                     # Calculate secret hash
-                    secret_value = finding.get('raw', '')
+                    secret_value = normalized_finding.get('raw', '')
+                    if not secret_value:
+                        self.logger.debug(f"Skipping finding with empty secret value")
+                        continue
+                        
                     secret_hash = hashlib.sha256(secret_value.encode()).hexdigest()
                     
                     # Check if secret already exists
@@ -598,12 +1333,12 @@ class SecretScanner:
                         """, (
                             secret_hash,
                             secret_value,  # Store the actual secret value
-                            finding.get('type', 'unknown'),
-                            finding.get('detector', 'unknown'),
-                            finding.get('verified', False),
+                            normalized_finding.get('type', 'unknown'),
+                            normalized_finding.get('detector', 'unknown'),
+                            normalized_finding.get('verified', False),
                             True,  # is_active
-                            finding.get('severity', 'medium'),
-                            finding.get('confidence', 'medium')
+                            normalized_finding.get('severity', 'medium'),
+                            normalized_finding.get('confidence', 'medium')
                         ))
                         secret_id = cursor.lastrowid
                     
@@ -624,10 +1359,17 @@ class SecretScanner:
                         AND (url_id = ? OR (url_id IS NULL AND ? IS NULL))
                         AND file_path = ?
                         AND line_number = ?
-                    """, (secret_id, url_id, url_id, finding.get('file', ''), finding.get('line', 0)))
+                    """, (secret_id, url_id, url_id, normalized_finding.get('file', ''), normalized_finding.get('line', 0)))
                     
                     if not cursor.fetchone():
-                        # Insert finding
+                        # Insert finding with enhanced validation result including URL context
+                        enhanced_validation_result = {
+                            'confidence': normalized_finding.get('confidence', 'medium'),
+                            'metadata': normalized_finding.get('metadata', {}),
+                            'url_context': url_context,
+                            'precise_mapping_available': url_context and url_context.get('precision_level') == 'exact'
+                        }
+                        
                         cursor.execute("""
                             INSERT INTO findings (
                                 secret_id, url_id, line_number, snippet,
@@ -637,24 +1379,37 @@ class SecretScanner:
                         """, (
                             secret_id,
                             url_id,
-                            finding.get('line', 0),
-                            finding.get('context', '')[:500],  # Limit snippet length
+                            normalized_finding.get('line', 0),
+                            normalized_finding.get('context', '')[:500],  # Limit snippet length
                             self.current_scan_run_id,
-                            finding.get('file', ''),
+                            normalized_finding.get('file', ''),
                             'pending',
-                            json.dumps({
-                                'confidence': finding.get('confidence', 'medium'),
-                                'metadata': finding.get('metadata', {})
-                            })
+                            json.dumps(enhanced_validation_result)
                         ))
+                        
                         stored_count += 1
+                        
+                        # Store additional JS chunk metadata if available
+                        if url and url_context and url_context.get('precision_level') == 'exact':
+                            if self.precise_url_mapper and normalized_finding['file'].endswith('.js'):
+                                filename = Path(normalized_finding['file']).name
+                                chunk_metadata = {
+                                    'size': Path(normalized_finding['file']).stat().st_size if Path(normalized_finding['file']).exists() else 0,
+                                    'has_secrets': True,
+                                    'secret_types': [normalized_finding.get('type', 'unknown')],
+                                    'load_context': url_context
+                                }
+                                self.precise_url_mapper.store_js_chunk_metadata(filename, url, chunk_metadata)
                     
                     # Update statistics
-                    self.stats['secret_types'][finding.get('type', 'unknown')] += 1
+                    self.stats['secret_types'][normalized_finding.get('type', 'unknown')] += 1
                     
+                except sqlite3.Error as e:
+                    self.logger.error(f"Database error storing finding: {e}")
+                    conn.rollback()
+                    continue
                 except Exception as e:
                     self.logger.error(f"Failed to store finding: {e}")
-                    conn.rollback()
                     continue
             
             conn.commit()
@@ -665,7 +1420,7 @@ class SecretScanner:
         return stored_count
     
     def _update_scan_statistics(self):
-        """Update scan run statistics in database."""
+        """Update scan run statistics in database with precise mapping stats."""
         if not self.db or not self.current_scan_run_id:
             return
         
@@ -673,8 +1428,13 @@ class SecretScanner:
             conn = self.db.get_connection()
             cursor = conn.cursor()
             
-            # Convert tool results and secret types to JSON
-            tool_results_json = json.dumps(dict(self.stats['tool_results']))
+            # Add precise mapping statistics to tool results
+            enhanced_tool_results = dict(self.stats['tool_results'])
+            enhanced_tool_results['precise_mappings_used'] = self.stats['precise_mappings_used']
+            enhanced_tool_results['fallback_mappings_used'] = self.stats['fallback_mappings_used']
+            
+            # Convert to JSON
+            tool_results_json = json.dumps(enhanced_tool_results)
             secret_types_json = json.dumps(dict(self.stats['secret_types']))
             errors_json = json.dumps(self.stats['errors'])
             
@@ -1280,8 +2040,17 @@ class SecretScanner:
             return secret[:4] + '*' * 12 + secret[-4:]
     
     def get_statistics(self) -> Dict:
-        """Get scanning statistics."""
-        return {
+        """Get scanning statistics with precise mapping info."""
+        base_stats = {
             **self.stats,
             'scan_rate': f"{self.stats['files_scanned'] / max(self.stats['scan_duration'], 1):.2f} files/sec"
         }
+        
+        # Add mapping efficiency stats
+        total_mappings = self.stats['precise_mappings_used'] + self.stats['fallback_mappings_used']
+        if total_mappings > 0:
+            base_stats['precise_mapping_rate'] = f"{(self.stats['precise_mappings_used'] / total_mappings) * 100:.1f}%"
+        else:
+            base_stats['precise_mapping_rate'] = "0.0%"
+        
+        return base_stats

@@ -61,7 +61,7 @@ from loguru import logger
 
 
 class DatabaseManager:
-    """Handle all database operations."""
+    """Handle all database operations with precise URL mapping support."""
     
     def __init__(self, db_path: str):
         """Initialize database connection."""
@@ -78,7 +78,7 @@ class DatabaseManager:
         self._migrate_schema()
     
     def _create_schema(self):
-        """Create database schema with all required columns."""
+        """Create database schema with all required columns and precise URL mapping tables."""
         with self.conn:
             # URLs table with all required columns
             self.conn.execute("""
@@ -101,7 +101,7 @@ class DatabaseManager:
                 )
             """)
             
-            # Secrets table (unique secrets) - UPDATED WITH secret_value COLUMN
+            # Secrets table (unique secrets) - WITH secret_value COLUMN
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS secrets (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,20 +175,93 @@ class DatabaseManager:
                 )
             """)
             
-            # Create indexes
+            # ===== NEW TABLES FOR PRECISE URL MAPPING =====
+            
+            # Page resources table - Track resource relationships
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS page_resources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_url_id INTEGER NOT NULL,
+                    resource_url TEXT NOT NULL,
+                    resource_filename TEXT,
+                    resource_type TEXT NOT NULL, -- 'script', 'css', 'image', 'xhr'
+                    load_method TEXT, -- 'static', 'dynamic', 'fetch', 'xhr'
+                    load_timing_ms INTEGER, -- Time after page load
+                    referrer_url TEXT,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    scan_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (parent_url_id) REFERENCES urls(id),
+                    UNIQUE(parent_url_id, resource_url, scan_id)
+                )
+            """)
+            
+            # JS chunk metadata table - Enhanced JS chunk tracking
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS js_chunk_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chunk_filename TEXT NOT NULL,
+                    parent_page_url_id INTEGER NOT NULL,
+                    chunk_hash TEXT,
+                    webpack_chunk_id TEXT,
+                    source_map_url TEXT,
+                    entry_point BOOLEAN DEFAULT FALSE,
+                    chunk_size_bytes INTEGER,
+                    load_order INTEGER,
+                    dependencies TEXT, -- JSON array of other chunks
+                    scan_id TEXT,
+                    has_secrets BOOLEAN DEFAULT FALSE,
+                    secret_count INTEGER DEFAULT 0,
+                    load_context TEXT, -- JSON with load timing, method, etc.
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (parent_page_url_id) REFERENCES urls(id),
+                    UNIQUE(chunk_filename, parent_page_url_id, scan_id)
+                )
+            """)
+            
+            # ===== CREATE INDEXES =====
+            
+            # Original indexes
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_domain ON urls(domain)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_scan_id ON urls(scan_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_fetch_status ON urls(fetch_status)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_file_path ON urls(file_path)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_urls_file_name ON urls(file_name)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_scan_run ON findings(scan_run_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_secret ON findings(secret_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_validation ON findings(validation_status)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_secrets_hash ON secrets(secret_hash)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_secrets_type ON secrets(secret_type)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_secrets_detector ON secrets(detector_name)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_baselines_domain ON baselines(domain)")
+            
+            # NEW INDEXES FOR PRECISE URL MAPPING
+            
+            # Indexes for page_resources table
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_parent ON page_resources(parent_url_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_scan ON page_resources(scan_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_filename ON page_resources(resource_filename)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_type ON page_resources(resource_type)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_load_method ON page_resources(load_method)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_url ON page_resources(resource_url)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_page_resources_timing ON page_resources(load_timing_ms)")
+            
+            # Indexes for js_chunk_metadata table  
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_filename ON js_chunk_metadata(chunk_filename)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_parent ON js_chunk_metadata(parent_page_url_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_scan ON js_chunk_metadata(scan_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_hash ON js_chunk_metadata(chunk_hash)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_webpack_id ON js_chunk_metadata(webpack_chunk_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_secrets ON js_chunk_metadata(has_secrets)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_js_chunk_entry ON js_chunk_metadata(entry_point)")
     
     def _migrate_schema(self):
-        """Migrate existing database schema to add missing columns."""
+        """Migrate existing database schema to add missing columns and tables."""
         with self.conn:
+            # ===== EXISTING MIGRATIONS =====
+            
             # Check if scan_runs table exists
             cursor = self.conn.execute("""
                 SELECT name FROM sqlite_master 
@@ -242,6 +315,362 @@ class DatabaseManager:
                         logger.info("Added secret_value column to secrets table")
                     except sqlite3.OperationalError as e:
                         logger.debug(f"Could not add secret_value column: {e}")
+            
+            # ===== NEW MIGRATIONS FOR PRECISE URL MAPPING =====
+            
+            # Check if page_resources table exists
+            cursor = self.conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='page_resources'
+            """)
+
+            if not cursor.fetchone():
+                logger.info("Creating page_resources table for precise URL mapping")
+                self.conn.execute("""
+                    CREATE TABLE page_resources (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        parent_url_id INTEGER NOT NULL,
+                        resource_url TEXT NOT NULL,
+                        resource_filename TEXT,
+                        resource_type TEXT NOT NULL,
+                        load_method TEXT,
+                        load_timing_ms INTEGER,
+                        referrer_url TEXT,
+                        first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        scan_id TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (parent_url_id) REFERENCES urls(id),
+                        UNIQUE(parent_url_id, resource_url, scan_id)
+                    )
+                """)
+                
+                # Create indexes for page_resources
+                indexes_to_create = [
+                    "CREATE INDEX idx_page_resources_parent ON page_resources(parent_url_id)",
+                    "CREATE INDEX idx_page_resources_scan ON page_resources(scan_id)",
+                    "CREATE INDEX idx_page_resources_filename ON page_resources(resource_filename)",
+                    "CREATE INDEX idx_page_resources_type ON page_resources(resource_type)",
+                    "CREATE INDEX idx_page_resources_load_method ON page_resources(load_method)",
+                    "CREATE INDEX idx_page_resources_url ON page_resources(resource_url)",
+                    "CREATE INDEX idx_page_resources_timing ON page_resources(load_timing_ms)"
+                ]
+                
+                for index_sql in indexes_to_create:
+                    try:
+                        self.conn.execute(index_sql)
+                    except sqlite3.OperationalError as e:
+                        logger.debug(f"Could not create index: {e}")
+                
+                logger.info("✓ page_resources table and indexes created successfully")
+
+            # Check if js_chunk_metadata table exists
+            cursor = self.conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='js_chunk_metadata'
+            """)
+
+            if not cursor.fetchone():
+                logger.info("Creating js_chunk_metadata table for enhanced JS tracking")
+                self.conn.execute("""
+                    CREATE TABLE js_chunk_metadata (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chunk_filename TEXT NOT NULL,
+                        parent_page_url_id INTEGER NOT NULL,
+                        chunk_hash TEXT,
+                        webpack_chunk_id TEXT,
+                        source_map_url TEXT,
+                        entry_point BOOLEAN DEFAULT FALSE,
+                        chunk_size_bytes INTEGER,
+                        load_order INTEGER,
+                        dependencies TEXT,
+                        scan_id TEXT,
+                        has_secrets BOOLEAN DEFAULT FALSE,
+                        secret_count INTEGER DEFAULT 0,
+                        load_context TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (parent_page_url_id) REFERENCES urls(id),
+                        UNIQUE(chunk_filename, parent_page_url_id, scan_id)
+                    )
+                """)
+                
+                # Create indexes for js_chunk_metadata
+                indexes_to_create = [
+                    "CREATE INDEX idx_js_chunk_filename ON js_chunk_metadata(chunk_filename)",
+                    "CREATE INDEX idx_js_chunk_parent ON js_chunk_metadata(parent_page_url_id)",
+                    "CREATE INDEX idx_js_chunk_scan ON js_chunk_metadata(scan_id)",
+                    "CREATE INDEX idx_js_chunk_hash ON js_chunk_metadata(chunk_hash)",
+                    "CREATE INDEX idx_js_chunk_webpack_id ON js_chunk_metadata(webpack_chunk_id)",
+                    "CREATE INDEX idx_js_chunk_secrets ON js_chunk_metadata(has_secrets)",
+                    "CREATE INDEX idx_js_chunk_entry ON js_chunk_metadata(entry_point)"
+                ]
+                
+                for index_sql in indexes_to_create:
+                    try:
+                        self.conn.execute(index_sql)
+                    except sqlite3.OperationalError as e:
+                        logger.debug(f"Could not create index: {e}")
+                
+                logger.info("✓ js_chunk_metadata table and indexes created successfully")
+            
+            # Check for missing columns in existing precise mapping tables
+            self._migrate_precise_mapping_columns()
+    
+    def _migrate_precise_mapping_columns(self):
+        """Migrate existing precise mapping tables to add any missing columns."""
+        try:
+            # Check page_resources table columns
+            cursor = self.conn.execute("PRAGMA table_info(page_resources)")
+            if cursor.fetchone():  # Table exists
+                cursor = self.conn.execute("PRAGMA table_info(page_resources)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                
+                # Columns that should exist in page_resources
+                required_columns = [
+                    ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+                    ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+                ]
+                
+                for column_name, column_def in required_columns:
+                    if column_name not in existing_columns:
+                        try:
+                            self.conn.execute(f"""
+                                ALTER TABLE page_resources 
+                                ADD COLUMN {column_name} {column_def}
+                            """)
+                            logger.info(f"Added {column_name} column to page_resources table")
+                        except sqlite3.OperationalError as e:
+                            logger.debug(f"Could not add column {column_name} to page_resources: {e}")
+            
+            # Check js_chunk_metadata table columns
+            cursor = self.conn.execute("PRAGMA table_info(js_chunk_metadata)")
+            if cursor.fetchone():  # Table exists
+                cursor = self.conn.execute("PRAGMA table_info(js_chunk_metadata)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                
+                # Columns that should exist in js_chunk_metadata
+                required_columns = [
+                    ('has_secrets', 'BOOLEAN DEFAULT FALSE'),
+                    ('secret_count', 'INTEGER DEFAULT 0'),
+                    ('load_context', 'TEXT'),
+                    ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+                    ('updated_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+                ]
+                
+                for column_name, column_def in required_columns:
+                    if column_name not in existing_columns:
+                        try:
+                            self.conn.execute(f"""
+                                ALTER TABLE js_chunk_metadata 
+                                ADD COLUMN {column_name} {column_def}
+                            """)
+                            logger.info(f"Added {column_name} column to js_chunk_metadata table")
+                        except sqlite3.OperationalError as e:
+                            logger.debug(f"Could not add column {column_name} to js_chunk_metadata: {e}")
+                            
+        except Exception as e:
+            logger.error(f"Error during precise mapping column migration: {e}")
+    
+    def get_resource_relationships(self, scan_id: str, filename: str = None) -> List[Dict]:
+        """Get resource relationships for a scan, optionally filtered by filename."""
+        try:
+            cursor = self.conn.cursor()
+            
+            if filename:
+                cursor.execute("""
+                    SELECT 
+                        pr.id,
+                        u.url as parent_url,
+                        pr.resource_url,
+                        pr.resource_filename,
+                        pr.resource_type,
+                        pr.load_method,
+                        pr.load_timing_ms,
+                        pr.referrer_url,
+                        pr.first_seen
+                    FROM page_resources pr
+                    JOIN urls u ON pr.parent_url_id = u.id
+                    WHERE pr.scan_id = ? AND pr.resource_filename = ?
+                    ORDER BY pr.first_seen DESC
+                """, (scan_id, filename))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        pr.id,
+                        u.url as parent_url,
+                        pr.resource_url,
+                        pr.resource_filename,
+                        pr.resource_type,
+                        pr.load_method,
+                        pr.load_timing_ms,
+                        pr.referrer_url,
+                        pr.first_seen
+                    FROM page_resources pr
+                    JOIN urls u ON pr.parent_url_id = u.id
+                    WHERE pr.scan_id = ?
+                    ORDER BY pr.first_seen DESC
+                """, (scan_id,))
+            
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'id': row[0],
+                    'parent_url': row[1],
+                    'resource_url': row[2],
+                    'resource_filename': row[3],
+                    'resource_type': row[4],
+                    'load_method': row[5],
+                    'load_timing_ms': row[6],
+                    'referrer_url': row[7],
+                    'first_seen': row[8]
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to get resource relationships: {e}")
+            return []
+    
+    def get_js_chunk_metadata(self, scan_id: str, filename: str = None) -> List[Dict]:
+        """Get JS chunk metadata for a scan, optionally filtered by filename."""
+        try:
+            cursor = self.conn.cursor()
+            
+            if filename:
+                cursor.execute("""
+                    SELECT 
+                        jcm.id,
+                        jcm.chunk_filename,
+                        u.url as parent_page_url,
+                        jcm.chunk_hash,
+                        jcm.webpack_chunk_id,
+                        jcm.entry_point,
+                        jcm.chunk_size_bytes,
+                        jcm.load_order,
+                        jcm.dependencies,
+                        jcm.has_secrets,
+                        jcm.secret_count,
+                        jcm.load_context,
+                        jcm.created_at
+                    FROM js_chunk_metadata jcm
+                    JOIN urls u ON jcm.parent_page_url_id = u.id
+                    WHERE jcm.scan_id = ? AND jcm.chunk_filename = ?
+                    ORDER BY jcm.created_at DESC
+                """, (scan_id, filename))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        jcm.id,
+                        jcm.chunk_filename,
+                        u.url as parent_page_url,
+                        jcm.chunk_hash,
+                        jcm.webpack_chunk_id,
+                        jcm.entry_point,
+                        jcm.chunk_size_bytes,
+                        jcm.load_order,
+                        jcm.dependencies,
+                        jcm.has_secrets,
+                        jcm.secret_count,
+                        jcm.load_context,
+                        jcm.created_at
+                    FROM js_chunk_metadata jcm
+                    JOIN urls u ON jcm.parent_page_url_id = u.id
+                    WHERE jcm.scan_id = ?
+                    ORDER BY jcm.created_at DESC
+                """, (scan_id,))
+            
+            results = []
+            for row in cursor.fetchall():
+                dependencies = []
+                if row[8]:  # dependencies column
+                    try:
+                        dependencies = json.loads(row[8])
+                    except:
+                        pass
+                
+                load_context = {}
+                if row[11]:  # load_context column
+                    try:
+                        load_context = json.loads(row[11])
+                    except:
+                        pass
+                
+                results.append({
+                    'id': row[0],
+                    'chunk_filename': row[1],
+                    'parent_page_url': row[2],
+                    'chunk_hash': row[3],
+                    'webpack_chunk_id': row[4],
+                    'entry_point': bool(row[5]),
+                    'chunk_size_bytes': row[6],
+                    'load_order': row[7],
+                    'dependencies': dependencies,
+                    'has_secrets': bool(row[9]),
+                    'secret_count': row[10],
+                    'load_context': load_context,
+                    'created_at': row[12]
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to get JS chunk metadata: {e}")
+            return []
+    
+    def get_precise_mapping_stats(self, scan_id: str) -> Dict:
+        """Get statistics about precise URL mapping for a scan."""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Count resource relationships
+            cursor.execute("""
+                SELECT COUNT(*) FROM page_resources WHERE scan_id = ?
+            """, (scan_id,))
+            resource_count = cursor.fetchone()[0]
+            
+            # Count JS chunks with metadata
+            cursor.execute("""
+                SELECT COUNT(*) FROM js_chunk_metadata WHERE scan_id = ?
+            """, (scan_id,))
+            js_chunk_count = cursor.fetchone()[0]
+            
+            # Count JS chunks with secrets
+            cursor.execute("""
+                SELECT COUNT(*) FROM js_chunk_metadata 
+                WHERE scan_id = ? AND has_secrets = TRUE
+            """, (scan_id,))
+            js_chunks_with_secrets = cursor.fetchone()[0]
+            
+            # Get load method breakdown
+            cursor.execute("""
+                SELECT load_method, COUNT(*) 
+                FROM page_resources 
+                WHERE scan_id = ? 
+                GROUP BY load_method
+            """, (scan_id,))
+            
+            load_methods = {}
+            for row in cursor.fetchall():
+                load_methods[row[0] or 'unknown'] = row[1]
+            
+            return {
+                'total_resource_relationships': resource_count,
+                'total_js_chunks_tracked': js_chunk_count,
+                'js_chunks_with_secrets': js_chunks_with_secrets,
+                'load_method_breakdown': load_methods,
+                'precise_mapping_enabled': resource_count > 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get precise mapping stats: {e}")
+            return {
+                'total_resource_relationships': 0,
+                'total_js_chunks_tracked': 0,
+                'js_chunks_with_secrets': 0,
+                'load_method_breakdown': {},
+                'precise_mapping_enabled': False
+            }
     
     def get_connection(self):
         """Get database connection for use with context manager."""
@@ -595,10 +1024,10 @@ class SecretsScanner:
                 self.validator = SecretValidator(self.config)
             
             # Reporters
-            self.html_reporter = HTMLReporter(self.config)
+            self.html_reporter = HTMLReporter(self.config, self.db)
             
             if self.config.get('slack_webhook_url') and self.config.get('enable_slack', True):
-                self.slack_notifier = SlackNotifier(self.config)
+                self.slack_notifier = SlackNotifier(self.config, db_path)
             
             logger.info("All components initialized successfully")
             
@@ -658,24 +1087,19 @@ class SecretsScanner:
         filename = self.url_to_filename(url)
         
         with self.db.conn:
+            # Use INSERT ... ON CONFLICT for better handling
             cursor = self.db.conn.execute("""
-                INSERT OR IGNORE INTO urls (url, domain, scan_id, category, file_name)
+                INSERT INTO urls (url, domain, scan_id, category, file_name)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    scan_id = excluded.scan_id,
+                    category = excluded.category,
+                    file_name = excluded.file_name
             """, (url, domain, self.scan_id, category, filename))
             
-            if cursor.lastrowid:
-                return cursor.lastrowid
-            else:
-                # URL already exists, update it
-                cursor = self.db.conn.execute(
-                    "UPDATE urls SET scan_id = ?, category = ?, file_name = ? WHERE url = ?",
-                    (self.scan_id, category, filename, url)
-                )
-                # Get its ID
-                cursor = self.db.conn.execute(
-                    "SELECT id FROM urls WHERE url = ?", (url,)
-                )
-                return cursor.fetchone()[0]
+            # Get the ID of the inserted/updated row
+            cursor = self.db.conn.execute("SELECT id FROM urls WHERE url = ?", (url,))
+            return cursor.fetchone()[0]
     
     def _phase_url_discovery(self, domains: List[str], scan_type: str) -> Tuple[List[str], Dict]:
         """Phase 1: Discover URLs for the given domains and store in database."""
@@ -737,8 +1161,13 @@ class SecretsScanner:
                         discovered_urls = self.url_discovery.discover_urls(domain)
                         categorized = self.url_discovery.get_prioritized_urls(domain)
                     
+                    # Debug: Check what get_prioritized_urls returns
                     # Store URLs in database
                     for category, urls_list in categorized.items():
+                        for i, url in enumerate(urls_list):
+                            try:
+                                result = self._store_url(url, domain, category)
+                            except Exception as e:
                         for url in urls_list:
                             self._store_url(url, domain, category)
                     
@@ -1265,11 +1694,23 @@ class SecretsScanner:
                 f.validation_result,
                 s.first_seen,
                 s.last_seen,
-                COUNT(DISTINCT f2.url_id) as url_count
+                COUNT(DISTINCT f2.url_id) as url_count,
+                pr.resource_url as precise_resource_url,
+                pr.load_method,
+                pr.load_timing_ms,
+                pr.referrer_url,
+                pr.resource_type,
+                CASE WHEN pr.resource_url IS NOT NULL THEN 'exact' ELSE 'fallback' END as mapping_precision
             FROM findings f
             JOIN secrets s ON f.secret_id = s.id
+            JOIN scan_runs sr ON f.scan_run_id = sr.id
             LEFT JOIN urls u ON f.url_id = u.id
             LEFT JOIN findings f2 ON f2.secret_id = s.id
+            LEFT JOIN page_resources pr ON pr.resource_filename = CASE 
+                WHEN f.file_path LIKE '%/js/%' THEN SUBSTR(f.file_path, INSTR(f.file_path, '/js/') + 4)
+                WHEN f.file_path LIKE '%/metadata/%' THEN SUBSTR(f.file_path, INSTR(f.file_path, '/metadata/') + 10)
+                ELSE SUBSTR(f.file_path, INSTR(f.file_path, '/') + 1)
+            END AND pr.scan_id = sr.id
             WHERE f.scan_run_id = ?
         """
         
@@ -1315,7 +1756,14 @@ class SecretsScanner:
                 'secret': actual_secret,  # ACTUAL SECRET
                 'secret_display': actual_secret,  # ACTUAL SECRET  
                 'raw': actual_secret,  # ACTUAL SECRET
-                'tool': row[4]
+                'tool': row[4],
+                # ADD PRECISE MAPPING DATA
+                'precise_resource_url': row[18],
+                'load_method': row[19],
+                'load_timing_ms': row[20],
+                'referrer_url': row[21],
+                'resource_type': row[22],
+                'mapping_precision': row[23]
             }
             findings.append(finding)
         

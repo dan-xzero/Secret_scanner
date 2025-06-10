@@ -1,8 +1,9 @@
 /**
  * Enhanced Crawlee-based Web Crawler for Secret Scanner
- * WITH URL-BASED FILENAME SUPPORT
+ * WITH PRECISE URL MAPPING AND RESOURCE RELATIONSHIP TRACKING
  * 
- * Modified to accept and use URL-to-filename mappings from the main scanner
+ * Modified to track exact parent-child relationships between pages and JavaScript chunks
+ * FIXED: Parent page URL detection for dynamically loaded JS chunks
  */
 
 const { PlaywrightCrawler, Dataset, KeyValueStore, log, LogLevel } = require('crawlee');
@@ -31,6 +32,12 @@ const argv = yargs(hideBin(process.argv))
     description: 'Output directory for fetched content',
     type: 'string',
     demandOption: true
+  })
+  .option('scan-id', {
+    alias: 's',
+    description: 'Scan ID for precise resource tracking',
+    type: 'string',
+    default: `scan_${Date.now()}`
   })
   .option('url-mapping', {
     alias: 'u',
@@ -73,6 +80,11 @@ const argv = yargs(hideBin(process.argv))
     description: 'Process URLs in batches',
     type: 'number',
     default: 50
+  })
+  .option('enable-precise-mapping', {
+    description: 'Enable precise URL mapping (experimental)',
+    type: 'boolean',
+    default: true
   })
   .help()
   .alias('help', 'h')
@@ -124,11 +136,16 @@ const stats = {
   errors: 0,
   startTime: Date.now(),
   failedUrls: [],
-  errorDetails: {}
+  errorDetails: {},
+  resourceRelationships: 0,
+  preciseMappingsCreated: 0
 };
 
-// Intercepted JavaScript files
+// Intercepted JavaScript files with enhanced parent tracking
 const interceptedJsFiles = new Map();
+
+// Global page context tracking for precise parent URL detection
+const pageContextTracker = new Map();
 
 // URL-based filename mapping from main scanner
 let providedUrlMapping = {};
@@ -139,6 +156,9 @@ const urlMappings = {
   urlToFile: {},
   metadata: {}
 };
+
+// Global resource relationships storage
+const allResourceRelationships = [];
 
 // Blocked domains for resource optimization
 const BLOCKED_DOMAINS = [
@@ -155,6 +175,260 @@ const BLOCKED_RESOURCE_TYPES = [
   'image', 'media', 'font', 'stylesheet', 'ping', 'websocket', 'manifest',
   'other'
 ];
+
+/**
+ * Enhanced Resource Tracker for Precise URL Mapping
+ */
+class ResourceTracker {
+  constructor(page, pageUrl, scanId) {
+    this.page = page;
+    this.pageUrl = pageUrl;
+    this.scanId = scanId;
+    this.resources = [];
+    this.loadStartTime = Date.now();
+    this.dynamicLoads = [];
+    this.setupComplete = false;
+    
+    // Track this page context globally
+    pageContextTracker.set(page, pageUrl);
+  }
+
+  async setupTracking() {
+    try {
+      // Enhanced network monitoring
+      this.page.on('response', async (response) => {
+        await this.trackResponse(response);
+      });
+      
+      // Inject enhanced dynamic loading detection with better parent tracking
+      await this.page.addInitScript(() => {
+        // Store original page URL for reference
+        window.__originalPageUrl = window.location.href;
+        
+        // Enhanced dynamic import() tracking
+        if (window.import) {
+          const originalImport = window.import;
+          window.import = function(specifier) {
+            window.__dynamicImports = window.__dynamicImports || [];
+            window.__dynamicImports.push({
+              specifier: specifier,
+              timestamp: Date.now(),
+              parentUrl: window.__originalPageUrl || window.location.href,
+              loadMethod: 'dynamic-import'
+            });
+            return originalImport.call(this, specifier);
+          };
+        }
+
+        // Enhanced dynamic script creation tracking
+        const originalCreateElement = document.createElement;
+        document.createElement = function(tagName) {
+          const element = originalCreateElement.call(this, tagName);
+          
+          if (tagName.toLowerCase() === 'script') {
+            element.addEventListener('load', () => {
+              window.__dynamicScripts = window.__dynamicScripts || [];
+              window.__dynamicScripts.push({
+                src: element.src,
+                timestamp: Date.now(),
+                parentUrl: window.__originalPageUrl || window.location.href,
+                loadMethod: 'dynamic-script'
+              });
+            });
+          }
+          
+          return element;
+        };
+
+        // Enhanced fetch() tracking for JS files
+        const originalFetch = window.fetch;
+        window.fetch = function(input, init) {
+          const url = typeof input === 'string' ? input : input.url;
+          if (url && url.endsWith('.js')) {
+            window.__fetchedScripts = window.__fetchedScripts || [];
+            window.__fetchedScripts.push({
+              url: url,
+              timestamp: Date.now(),
+              parentUrl: window.__originalPageUrl || window.location.href,
+              method: 'fetch'
+            });
+          }
+          return originalFetch.call(this, input, init);
+        };
+
+        // Track webpack chunk loading patterns
+        const originalWebpackLoad = window.webpackJsonp || window.__webpack_require__;
+        if (originalWebpackLoad) {
+          window.__webpackChunksLoaded = window.__webpackChunksLoaded || [];
+          // This will be populated by webpack internals
+        }
+
+        // Track Next.js specific patterns
+        if (window.next || window._N_E) {
+          window.__nextJsChunks = window.__nextJsChunks || [];
+          // Monitor Next.js chunk loading
+        }
+      });
+      
+      this.setupComplete = true;
+      logger.debug(`ResourceTracker setup complete for ${this.pageUrl}`);
+    } catch (error) {
+      logger.error(`Failed to setup ResourceTracker for ${this.pageUrl}: ${error.message}`);
+    }
+  }
+
+  async trackResponse(response) {
+    try {
+      const url = response.url();
+      const request = response.request();
+      const resourceType = request.resourceType();
+      
+      if (resourceType === 'script' || url.endsWith('.js')) {
+        const loadTime = Date.now() - this.loadStartTime;
+        const headers = response.headers();
+        
+        const resourceInfo = {
+          url: url,
+          filename: this.extractFilename(url),
+          parentUrl: this.pageUrl,
+          loadMethod: this.determineLoadMethod(request, url),
+          loadTime: loadTime,
+          referrer: request.headers()['referer'] || this.pageUrl,
+          responseSize: headers['content-length'] || 'unknown',
+          scanId: this.scanId,
+          resourceType: resourceType,
+          timestamp: new Date().toISOString(),
+          statusCode: response.status(),
+          contentType: headers['content-type'] || 'unknown',
+          initiator: this.getInitiatorInfo(request),
+          isThirdParty: this.isThirdPartyResource(url, this.pageUrl),
+          isWebpackChunk: this.isWebpackChunk(url),
+          isNextJsChunk: this.isNextJsChunk(url)
+        };
+        
+        this.resources.push(resourceInfo);
+        
+        // Store in global collection
+        allResourceRelationships.push(resourceInfo);
+        stats.resourceRelationships++;
+        
+        logger.debug(`Tracked resource: ${url} loaded by ${this.pageUrl} (${loadTime}ms, ${resourceInfo.loadMethod})`);
+      }
+    } catch (error) {
+      logger.debug(`Error tracking response for ${response.url()}: ${error.message}`);
+    }
+  }
+
+  extractFilename(url) {
+    return getFilenameForUrl(url, '.js');
+  }
+
+  determineLoadMethod(request, url) {
+    const frame = request.frame();
+    const initiator = request.headers()['sec-fetch-dest'];
+    
+    // Enhanced detection for webpack/Next.js patterns
+    if (this.isWebpackChunk(url) || this.isNextJsChunk(url)) {
+      return 'dynamic-chunk';
+    }
+    
+    if (initiator === 'script') {
+      return 'static';
+    } else if (initiator === 'empty') {
+      return 'dynamic';
+    }
+    
+    // Check if it's a fetch or XHR request
+    const fetchMode = request.headers()['sec-fetch-mode'];
+    if (fetchMode === 'cors') {
+      return 'fetch';
+    }
+    
+    // Fallback detection
+    return frame ? 'static' : 'dynamic';
+  }
+
+  isWebpackChunk(url) {
+    return url.includes('/chunks/') || 
+           url.includes('chunk.') || 
+           /\/\d+-[a-f0-9]+\.js$/.test(url) ||
+           url.includes('webpack');
+  }
+
+  isNextJsChunk(url) {
+    return url.includes('/_next/static/chunks/') ||
+           url.includes('/_next/static/js/') ||
+           url.includes('.next/');
+  }
+
+  getInitiatorInfo(request) {
+    const headers = request.headers();
+    return {
+      dest: headers['sec-fetch-dest'],
+      mode: headers['sec-fetch-mode'],
+      site: headers['sec-fetch-site']
+    };
+  }
+
+  isThirdPartyResource(resourceUrl, pageUrl) {
+    try {
+      const resourceDomain = new URL(resourceUrl).hostname;
+      const pageDomain = new URL(pageUrl).hostname;
+      return resourceDomain !== pageDomain;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async getDynamicLoads() {
+    try {
+      return await this.page.evaluate(() => {
+        return {
+          dynamicImports: window.__dynamicImports || [],
+          dynamicScripts: window.__dynamicScripts || [],
+          fetchedScripts: window.__fetchedScripts || [],
+          webpackChunks: window.__webpackChunksLoaded || [],
+          nextJsChunks: window.__nextJsChunks || []
+        };
+      });
+    } catch (error) {
+      logger.debug(`Failed to get dynamic loads: ${error.message}`);
+      return {
+        dynamicImports: [],
+        dynamicScripts: [],
+        fetchedScripts: [],
+        webpackChunks: [],
+        nextJsChunks: []
+      };
+    }
+  }
+
+  getResources() {
+    return this.resources;
+  }
+
+  getResourceCount() {
+    return this.resources.length;
+  }
+}
+
+/**
+ * Get the current page URL from context tracking
+ */
+function getCurrentPageUrl(page) {
+  const contextUrl = pageContextTracker.get(page);
+  if (contextUrl) {
+    return contextUrl;
+  }
+  
+  // Fallback: try to get from page URL
+  try {
+    return page.url();
+  } catch (error) {
+    logger.debug(`Failed to get current page URL: ${error.message}`);
+    return 'unknown';
+  }
+}
 
 /**
  * Load URL to filename mapping if provided
@@ -223,19 +497,30 @@ function getSafeFilename(url, extension = '') {
 }
 
 /**
- * Add URL mapping
+ * Add URL mapping with enhanced metadata
  */
-function addUrlMapping(localPath, originalUrl, contentType) {
+function addUrlMapping(localPath, originalUrl, contentType, resourceInfo = null) {
   // Make path relative to output directory
   const relativePath = path.relative(argv.output, localPath).replace(/\\/g, '/');
   
   // Store bidirectional mapping
-  urlMappings.fileToUrl[relativePath] = {
+  const mappingData = {
     url: originalUrl,
     contentType: contentType,
     timestamp: new Date().toISOString()
   };
-  
+
+  // Add resource relationship data if available
+  if (resourceInfo) {
+    mappingData.parentUrl = resourceInfo.parentUrl;
+    mappingData.loadMethod = resourceInfo.loadMethod;
+    mappingData.loadTime = resourceInfo.loadTime;
+    mappingData.isThirdParty = resourceInfo.isThirdParty;
+    mappingData.preciseMappingEnabled = true;
+    stats.preciseMappingsCreated++;
+  }
+
+  urlMappings.fileToUrl[relativePath] = mappingData;
   urlMappings.urlToFile[originalUrl] = relativePath;
   
   // Extract domain for metadata
@@ -245,22 +530,28 @@ function addUrlMapping(localPath, originalUrl, contentType) {
   if (!urlMappings.metadata[domain]) {
     urlMappings.metadata[domain] = {
       urls: [],
-      files: []
+      files: [],
+      resourceRelationships: []
     };
   }
   
   urlMappings.metadata[domain].urls.push(originalUrl);
   urlMappings.metadata[domain].files.push(relativePath);
   
-  logger.debug(`Mapped: ${relativePath} -> ${originalUrl}`);
+  if (resourceInfo) {
+    urlMappings.metadata[domain].resourceRelationships.push(resourceInfo);
+  }
+  
+  logger.debug(`Mapped: ${relativePath} -> ${originalUrl}${resourceInfo ? ' (with precise mapping)' : ''}`);
 }
 
 /**
- * Save URL mappings to file
+ * Save URL mappings with enhanced resource relationship data
  */
 async function saveUrlMappings(outputDir) {
   const mappingPath = path.join(outputDir, 'url_mappings.json');
   const reverseMappingPath = path.join(outputDir, 'file_to_url_mappings.json');
+  const resourceMappingsPath = path.join(outputDir, 'resource_relationships.json');
   
   try {
     // Save complete mappings
@@ -281,8 +572,33 @@ async function saveUrlMappings(outputDir) {
       JSON.stringify(simplifiedMapping, null, 2),
       'utf-8'
     );
+
+    // Save resource relationships
+    const resourceRelationshipData = {
+      relationships: allResourceRelationships,
+      scanId: argv.scanId,
+      timestamp: new Date().toISOString(),
+      totalRelationships: allResourceRelationships.length,
+      domains: [...new Set(allResourceRelationships.map(r => new URL(r.parentUrl).hostname))],
+      stats: {
+        staticLoads: allResourceRelationships.filter(r => r.loadMethod === 'static').length,
+        dynamicLoads: allResourceRelationships.filter(r => r.loadMethod === 'dynamic').length,
+        dynamicChunks: allResourceRelationships.filter(r => r.loadMethod === 'dynamic-chunk').length,
+        thirdPartyResources: allResourceRelationships.filter(r => r.isThirdParty).length,
+        webpackChunks: allResourceRelationships.filter(r => r.isWebpackChunk).length,
+        nextJsChunks: allResourceRelationships.filter(r => r.isNextJsChunk).length
+      }
+    };
+
+    await fs.writeFile(
+      resourceMappingsPath,
+      JSON.stringify(resourceRelationshipData, null, 2),
+      'utf-8'
+    );
     
     logger.info(`Saved URL mappings to ${mappingPath}`);
+    logger.info(`Saved resource relationships: ${allResourceRelationships.length} relationships tracked`);
+    
   } catch (error) {
     logger.error(`Failed to save URL mappings: ${error.message}`);
   }
@@ -419,6 +735,8 @@ async function runCrawler() {
       .filter(url => shouldProcessUrl(url));
     
     logger.info(`Found ${urls.length} URLs to process`);
+    logger.info(`Precise URL mapping: ${argv.enablePreciseMapping ? 'ENABLED' : 'DISABLED'}`);
+    logger.info(`Scan ID: ${argv.scanId}`);
     
     if (urls.length === 0) {
       logger.warn('No valid URLs found in input file');
@@ -433,7 +751,8 @@ async function runCrawler() {
       json: path.join(outputDir, 'json'),
       inlineScripts: path.join(outputDir, 'inline-scripts'),
       metadata: path.join(outputDir, 'metadata'),
-      errors: path.join(outputDir, 'errors')
+      errors: path.join(outputDir, 'errors'),
+      resourceMaps: path.join(outputDir, 'resource-maps')
     };
     
     await Promise.all(Object.values(dirs).map(dir => fs.mkdir(dir, { recursive: true })));
@@ -475,11 +794,11 @@ async function runCrawler() {
           page.setDefaultNavigationTimeout(timeoutMs);
           page.setDefaultTimeout(timeoutMs);
           
-          // Enhanced request interception
+          // Enhanced request interception with fixed parent page tracking
           await page.route('**/*', async (route) => {
-            const request = route.request();
-            const url = request.url();
-            const resourceType = request.resourceType();
+            const interceptedRequest = route.request();
+            const url = interceptedRequest.url();
+            const resourceType = interceptedRequest.resourceType();
             
             const isBlockedDomain = BLOCKED_DOMAINS.some(domain => url.includes(domain));
             const isBlockedType = BLOCKED_RESOURCE_TYPES.includes(resourceType);
@@ -489,18 +808,27 @@ async function runCrawler() {
               return;
             }
             
-            // Special handling for JavaScript files
+            // Special handling for JavaScript files with FIXED parent page detection
             if (resourceType === 'script' || url.endsWith('.js')) {
               try {
                 const response = await route.fetch();
                 if (response.ok()) {
                   const content = await response.text();
                   if (content && content.length < 10 * 1024 * 1024) {
+                    
+                    // FIXED: Get the correct parent page URL
+                    const parentPageUrl = getCurrentPageUrl(page);
+                    
                     interceptedJsFiles.set(url, {
                       content,
-                      fromPage: request.url,
-                      headers: response.headers()
+                      fromPage: parentPageUrl,  // ✅ FIXED - now gets actual parent page URL
+                      headers: response.headers(),
+                      timestamp: new Date().toISOString(),
+                      scanId: argv.scanId,
+                      interceptedDuringCrawl: true
                     });
+                    
+                    logger.debug(`Intercepted JS: ${url} from page: ${parentPageUrl}`);
                   }
                 }
                 await route.fulfill({ response });
@@ -542,10 +870,17 @@ async function runCrawler() {
       requestHandler: async ({ request, page, response }) => {
         const url = request.url;
         const startTime = Date.now();
+        let resourceTracker = null;
         
         try {
           logger.info(`Processing: ${url} (attempt ${request.retryCount + 1})`);
           stats.urlsProcessed++;
+          
+          // Initialize ResourceTracker for precise URL mapping
+          if (argv.enablePreciseMapping) {
+            resourceTracker = new ResourceTracker(page, url, argv.scanId);
+            await resourceTracker.setupTracking();
+          }
           
           // Wait for page to load
           try {
@@ -608,7 +943,19 @@ async function runCrawler() {
               stats.inlineScriptsSaved++;
               
               const inlineScriptUrl = `${url}#inline-script-${i}`;
-              addUrlMapping(scriptPath, inlineScriptUrl, 'inline-script');
+              
+              // Create resource info for inline script
+              const inlineResourceInfo = {
+                url: inlineScriptUrl,
+                parentUrl: url,
+                loadMethod: 'inline',
+                loadTime: 0,
+                resourceType: 'inline-script',
+                scanId: argv.scanId,
+                isThirdParty: false
+              };
+              
+              addUrlMapping(scriptPath, inlineScriptUrl, 'inline-script', inlineResourceInfo);
               
               // Save metadata
               const inlineScriptMeta = {
@@ -618,10 +965,12 @@ async function runCrawler() {
                 parent_url: url,
                 script_index: i,
                 timestamp: new Date().toISOString(),
+                scanId: argv.scanId,
                 has_potential_secrets: script.content.toLowerCase().includes('key') || 
                                       script.content.toLowerCase().includes('token') ||
                                       script.content.toLowerCase().includes('secret') ||
-                                      script.content.toLowerCase().includes('password')
+                                      script.content.toLowerCase().includes('password'),
+                preciseMappingEnabled: argv.enablePreciseMapping
               };
               
               const metaFilename = `${baseFilename}_inline_${i}_meta.json`;
@@ -654,7 +1003,18 @@ async function runCrawler() {
             }
           }
           
-          // Save metadata
+          // Get resource relationships and dynamic loads
+          let resourceRelationships = [];
+          let dynamicLoads = {};
+          
+          if (resourceTracker) {
+            resourceRelationships = resourceTracker.getResources();
+            dynamicLoads = await resourceTracker.getDynamicLoads();
+            
+            logger.debug(`Tracked ${resourceRelationships.length} resources for ${url}`);
+          }
+          
+          // Save enhanced metadata with resource relationships
           const metadata = {
             url,
             timestamp: new Date().toISOString(),
@@ -664,12 +1024,62 @@ async function runCrawler() {
             inlineScriptsCount: inlineScripts.length,
             contentLength: html.length,
             processingTime: Date.now() - startTime,
-            attempt: request.retryCount + 1
+            attempt: request.retryCount + 1,
+            scanId: argv.scanId,
+            preciseMappingEnabled: argv.enablePreciseMapping
           };
+
+          // Add resource relationship data if available
+          if (argv.enablePreciseMapping && resourceTracker) {
+            metadata.resourceRelationships = resourceRelationships;
+            metadata.dynamicLoads = dynamicLoads;
+            metadata.resourceTrackingStats = {
+              totalResources: resourceRelationships.length,
+              staticLoads: resourceRelationships.filter(r => r.loadMethod === 'static').length,
+              dynamicLoads: resourceRelationships.filter(r => r.loadMethod === 'dynamic').length,
+              dynamicChunks: resourceRelationships.filter(r => r.loadMethod === 'dynamic-chunk').length,
+              thirdPartyResources: resourceRelationships.filter(r => r.isThirdParty).length,
+              webpackChunks: resourceRelationships.filter(r => r.isWebpackChunk).length,
+              nextJsChunks: resourceRelationships.filter(r => r.isNextJsChunk).length
+            };
+          }
           
           const metadataFilename = getFilenameForUrl(url, '_meta.json');
           const metadataPath = path.join(dirs.metadata, metadataFilename);
           await saveContent(JSON.stringify(metadata, null, 2), metadataPath);
+          
+          // Save per-page resource map
+          if (argv.enablePreciseMapping && resourceRelationships.length > 0) {
+            const resourceMapFilename = getFilenameForUrl(url, '_resources.json');
+            const resourceMapPath = path.join(dirs.resourceMaps, resourceMapFilename);
+            
+            const resourceMapData = {
+              pageUrl: url,
+              scanId: argv.scanId,
+              timestamp: new Date().toISOString(),
+              resources: resourceRelationships,
+              dynamicLoads: dynamicLoads,
+              summary: {
+                totalResources: resourceRelationships.length,
+                byLoadMethod: {
+                  static: resourceRelationships.filter(r => r.loadMethod === 'static').length,
+                  dynamic: resourceRelationships.filter(r => r.loadMethod === 'dynamic').length,
+                  dynamicChunk: resourceRelationships.filter(r => r.loadMethod === 'dynamic-chunk').length
+                },
+                byParty: {
+                  firstParty: resourceRelationships.filter(r => !r.isThirdParty).length,
+                  thirdParty: resourceRelationships.filter(r => r.isThirdParty).length
+                },
+                byType: {
+                  webpackChunks: resourceRelationships.filter(r => r.isWebpackChunk).length,
+                  nextJsChunks: resourceRelationships.filter(r => r.isNextJsChunk).length,
+                  regularScripts: resourceRelationships.filter(r => !r.isWebpackChunk && !r.isNextJsChunk).length
+                }
+              }
+            };
+            
+            await saveContent(JSON.stringify(resourceMapData, null, 2), resourceMapPath);
+          }
           
           stats.urlsSuccessful++;
           logger.info(`✓ Successfully processed ${url} in ${Date.now() - startTime}ms`);
@@ -685,7 +1095,8 @@ async function runCrawler() {
             timestamp: new Date().toISOString(),
             attempt: request.retryCount + 1,
             processingTime: Date.now() - startTime,
-            statusCode: response?.status()
+            statusCode: response?.status(),
+            scanId: argv.scanId
           };
           
           stats.failedUrls.push(url);
@@ -716,7 +1127,7 @@ async function runCrawler() {
     logger.info('Starting crawler...');
     await crawler.run();
     
-    // Save intercepted JavaScript files
+    // Save intercepted JavaScript files with enhanced metadata and fixed parent tracking
     logger.info(`Processing ${interceptedJsFiles.size} intercepted JavaScript files...`);
     
     for (const [jsUrl, jsData] of interceptedJsFiles) {
@@ -730,16 +1141,58 @@ async function runCrawler() {
       if (await saveContent(finalContent, jsPath)) {
         stats.jsSaved++;
         
-        addUrlMapping(jsPath, jsUrl, 'javascript');
+        // Find corresponding resource relationship from ResourceTracker
+        const resourceInfo = allResourceRelationships.find(r => r.url === jsUrl);
         
-        // Save JS metadata
+        // If no ResourceTracker data, create basic resource info from intercepted data
+        if (!resourceInfo && jsData.fromPage && jsData.fromPage !== jsUrl) {
+          const basicResourceInfo = {
+            url: jsUrl,
+            filename: jsFilename,
+            parentUrl: jsData.fromPage,
+            loadMethod: 'intercepted',
+            loadTime: 0,
+            resourceType: 'script',
+            scanId: argv.scanId,
+            isThirdParty: false,
+            timestamp: jsData.timestamp
+          };
+          
+          // Add to global relationships
+          allResourceRelationships.push(basicResourceInfo);
+          stats.resourceRelationships++;
+          
+          addUrlMapping(jsPath, jsUrl, 'javascript', basicResourceInfo);
+        } else {
+          addUrlMapping(jsPath, jsUrl, 'javascript', resourceInfo);
+        }
+        
+        // Save enhanced JS metadata with correct parent page info
         const jsMetadata = {
           url: jsUrl,
-          fromPage: jsData.fromPage,
+          fromPage: jsData.fromPage,  // ✅ FIXED - now contains correct parent page URL
           headers: jsData.headers,
           size: jsData.content.length,
-          timestamp: new Date().toISOString()
+          timestamp: jsData.timestamp,
+          scanId: jsData.scanId,
+          interceptedDuringCrawl: jsData.interceptedDuringCrawl
         };
+
+        // Add resource relationship data if available
+        if (resourceInfo) {
+          jsMetadata.parentUrl = resourceInfo.parentUrl;
+          jsMetadata.loadMethod = resourceInfo.loadMethod;
+          jsMetadata.loadTime = resourceInfo.loadTime;
+          jsMetadata.isThirdParty = resourceInfo.isThirdParty;
+          jsMetadata.isWebpackChunk = resourceInfo.isWebpackChunk;
+          jsMetadata.isNextJsChunk = resourceInfo.isNextJsChunk;
+          jsMetadata.preciseMappingEnabled = true;
+        } else if (jsData.fromPage && jsData.fromPage !== jsUrl) {
+          // Use intercepted data for basic mapping
+          jsMetadata.parentUrl = jsData.fromPage;
+          jsMetadata.loadMethod = 'intercepted';
+          jsMetadata.preciseMappingEnabled = true;
+        }
         
         const jsMetadataFilename = getFilenameForUrl(jsUrl, '_js_meta.json');
         const jsMetadataPath = path.join(dirs.metadata, jsMetadataFilename);
@@ -747,7 +1200,7 @@ async function runCrawler() {
       }
     }
     
-    // Save URL mappings
+    // Save URL mappings with resource relationships
     await saveUrlMappings(outputDir);
     
     // Save final statistics
@@ -771,7 +1224,9 @@ async function runCrawler() {
     }
     
     // Print summary
-    logger.info('=== Crawler Summary ===');
+    logger.info('=== Enhanced Crawler Summary ===');
+    logger.info(`Scan ID: ${argv.scanId}`);
+    logger.info(`Precise URL Mapping: ${argv.enablePreciseMapping ? 'ENABLED' : 'DISABLED'}`);
     logger.info(`URLs processed: ${stats.urlsProcessed}`);
     logger.info(`Successful: ${stats.urlsSuccessful} (${stats.successRate})`);
     logger.info(`Failed: ${stats.urlsFailed}`);
@@ -779,6 +1234,8 @@ async function runCrawler() {
     logger.info(`JavaScript files saved: ${stats.jsSaved}`);
     logger.info(`Inline scripts saved: ${stats.inlineScriptsSaved}`);
     logger.info(`JSON files saved: ${stats.jsonSaved}`);
+    logger.info(`Resource relationships tracked: ${stats.resourceRelationships}`);
+    logger.info(`Precise mappings created: ${stats.preciseMappingsCreated}`);
     logger.info(`Errors: ${stats.errors}`);
     logger.info(`Duration: ${duration.toFixed(2)} seconds`);
     logger.info(`Output directory: ${outputDir}`);
@@ -786,6 +1243,12 @@ async function runCrawler() {
     
     if (stats.failedUrls.length > 0) {
       logger.warn(`Failed URLs: ${stats.failedUrls.length} (see failed_urls.txt)`);
+    }
+    
+    if (argv.enablePreciseMapping) {
+      logger.info(`✓ Enhanced precise URL mapping completed successfully`);
+      logger.info(`✓ Resource relationship data saved to resource_relationships.json`);
+      logger.info(`✓ Fixed parent page detection for JavaScript chunks`);
     }
     
   } catch (error) {
@@ -809,10 +1272,10 @@ process.on('uncaughtException', (error) => {
 // Run the crawler
 runCrawler()
   .then(() => {
-    logger.info('Crawler completed successfully');
+    logger.info('Enhanced crawler completed successfully');
     process.exit(0);
   })
   .catch((error) => {
-    logger.error('Crawler failed:', error);
+    logger.error('Enhanced crawler failed:', error);
     process.exit(1);
   });

@@ -28,7 +28,7 @@ class BaselineManager:
         self.config = config
         
         # Database path
-        self.db_path = db_path or Path(config.get('data_storage_path', './data')) / 'scanner.db'
+        self.db_path = db_path or Path(config.get('data_storage_path', './data')) / 'secrets_scanner.db'
         
         # Baseline settings
         self.track_false_positives = config.get('baseline', {}).get('track_false_positives', True)
