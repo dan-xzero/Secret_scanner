@@ -1790,3 +1790,245 @@ class SlackNotifier:
     def get_statistics(self) -> Dict[str, Any]:
         """Get notification statistics"""
         return self.stats
+    def send_enhanced_findings_notification_with_baseline(self, summary_data: Dict[str, Any], baseline_comparison: Dict[str, int]) -> bool:
+        """
+        Send detailed Slack notification with baseline comparison and enhanced formatting.
+        
+        Args:
+            summary_data: Complete scan summary data including findings
+            baseline_comparison: Dictionary with new/recurring/resolved/false_positives counts
+            
+        Returns:
+            bool: True if notification sent successfully
+        """
+        try:
+            if not self.webhook_url:
+                logger.warning("No Slack webhook URL configured")
+                return False
+                
+            # Extract data
+            findings = summary_data.get('findings', [])
+            domain = summary_data.get('domain', 'Unknown')
+            scan_type = summary_data.get('scan_type', 'full')
+            scan_id = summary_data.get('scan_id', 'Unknown')
+            
+            new_count = baseline_comparison.get('new', 0)
+            recurring_count = baseline_comparison.get('recurring', 0)
+            resolved_count = baseline_comparison.get('resolved', 0)
+            fp_count = baseline_comparison.get('false_positives', 0)
+            
+            # Determine overall status and styling
+            if new_count > 0:
+                status_emoji = "🚨"
+                status_text = "NEW SECRETS DETECTED"
+                color = "danger"
+                urgency = "HIGH"
+            elif recurring_count > 0:
+                status_emoji = "⚠️"
+                status_text = "RECURRING SECRETS MONITORED"
+                color = "warning"
+                urgency = "MEDIUM"
+            elif resolved_count > 0:
+                status_emoji = "✅"
+                status_text = "SECRETS RESOLVED"
+                color = "good"
+                urgency = "LOW"
+            else:
+                status_emoji = "✅"
+                status_text = "CLEAN SCAN COMPLETED"
+                color = "good"
+                urgency = "INFO"
+            
+            # Build main header
+            header_text = f"{status_emoji} *{status_text}*\n"
+            header_text += f"🎯 *Domain:* `{domain}`\n"
+            header_text += f"🔍 *Scan Type:* {scan_type.title()}\n"
+            header_text += f"📊 *Baseline Summary:* {new_count} new • {recurring_count} recurring • {resolved_count} resolved"
+            
+            if fp_count > 0:
+                header_text += f" • {fp_count} filtered"
+            
+            # Create payload structure
+            payload = {
+                "username": self.username,
+                "icon_emoji": self.icon_emoji,
+                "attachments": [
+                    {
+                        "color": color,
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": header_text
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            # Add severity breakdown if there are current findings
+            if findings:
+                severity_breakdown = self._calculate_severity_breakdown_enhanced(findings)
+                
+                if any(count > 0 for count in severity_breakdown.values()):
+                    severity_text = "*🎯 Severity Breakdown:*\n"
+                    for severity, count in severity_breakdown.items():
+                        if count > 0:
+                            emoji = {"high": "🔴", "medium": "🟡", "low": "🟢", "critical": "🚫"}.get(severity.lower(), "⚪")
+                            severity_text += f"{emoji} {severity.title()}: {count}\n"
+                    
+                    payload["attachments"][0]["blocks"].append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": severity_text
+                        }
+                    })
+            
+            # Add individual secret details for NEW findings only
+            if new_count > 0:
+                new_findings = [f for f in findings if f.get('baseline_status') == 'new']
+                
+                if new_findings:
+                    secrets_text = "*🔍 New Secret Details:*\n"
+                    for i, finding in enumerate(new_findings[:6], 1):  # Show up to 6 secrets
+                        secret_type = finding.get('detector_name', finding.get('secret_type', 'Unknown'))
+                        file_path = finding.get('file_path', finding.get('url', 'Unknown'))
+                        line_num = finding.get('line_number', 'N/A')
+                        severity = finding.get('severity', 'medium').title()
+                        
+                        # Truncate long file paths for readability
+                        display_path = file_path
+                        if len(file_path) > 45:
+                            display_path = "..." + file_path[-42:]
+                        
+                        secrets_text += f"`{i}.` *{secret_type}* ({severity})\n"
+                        secrets_text += f"   📁 `{display_path}:{line_num}`\n"
+                    
+                    if len(new_findings) > 6:
+                        secrets_text += f"   ➕ ...and {len(new_findings) - 6} more new secrets\n"
+                    
+                    payload["attachments"][0]["blocks"].append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": secrets_text
+                        }
+                    })
+            
+            # Add mapping precision statistics
+            total_findings = len(findings)
+            if total_findings > 0:
+                precise_count = len([f for f in findings if f.get('file_path')])
+                fuzzy_count = total_findings - precise_count
+                
+                if total_findings > 0:
+                    precision_percent = (precise_count / total_findings) * 100
+                    mapping_text = f"*🎯 Mapping Precision:*\n"
+                    mapping_text += f"📍 Precise: {precise_count} ({precision_percent:.0f}%) • 🔄 Fuzzy: {fuzzy_count}"
+                    
+                    payload["attachments"][0]["blocks"].append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": mapping_text
+                        }
+                    })
+            
+            # Add scan details and actions
+            duration = summary_data.get('duration', 'Unknown')
+            urls_scanned = summary_data.get('urls_scanned', 0)
+            
+            action_text = f"*📋 Scan Details:*\n"
+            action_text += f"🔍 Scan ID: `{scan_id}`\n"
+            action_text += f"⏱️ Duration: {duration}\n"
+            action_text += f"🔗 URLs Processed: {urls_scanned}\n"
+            action_text += f"📊 Report: Available in dashboard"
+            
+            payload["attachments"][0]["blocks"].append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": action_text
+                }
+            })
+            
+            # Add critical mentions for high-priority new findings
+            if new_count > 0:
+                critical_new = [f for f in findings 
+                              if f.get('baseline_status') == 'new' 
+                              and f.get('severity', '').lower() in ['critical', 'high']]
+                
+                if critical_new and self.mention_on_critical and self.mention_users:
+                    mention_text = " ".join([f"<@{user}>" for user in self.mention_users])
+                    payload["text"] = f"{mention_text} {len(critical_new)} critical/high severity secrets detected!"
+            
+            # Send the notification
+            response = requests.post(
+                self.webhook_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"Enhanced baseline Slack notification sent for {domain} "
+                           f"({new_count} new, {recurring_count} recurring, {resolved_count} resolved)")
+                
+                # Record notification if tracking table exists
+                try:
+                    self._record_notification_enhanced(scan_id, 'enhanced_baseline', 'sent', baseline_comparison)
+                except:
+                    pass  # Non-critical
+                
+                return True
+            else:
+                logger.error(f"Failed to send enhanced Slack notification. "
+                            f"Status: {response.status_code}, Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error sending enhanced baseline Slack notification: {e}")
+            return False
+
+    def _calculate_severity_breakdown_enhanced(self, findings: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Calculate enhanced severity breakdown from findings."""
+        breakdown = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        
+        for finding in findings:
+            severity = finding.get('severity', 'medium').lower()
+            if severity in breakdown:
+                breakdown[severity] += 1
+            else:
+                breakdown['medium'] += 1  # Default unknown to medium
+        
+        return breakdown
+
+    def _record_notification_enhanced(self, scan_id: str, notification_type: str, status: str, 
+                                     baseline_data: Dict[str, int]) -> None:
+        """Record enhanced notification with baseline data."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            # Check if notification_history table exists
+            table_check = conn.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='notification_history'
+            """).fetchone()
+            
+            if table_check:
+                message_summary = f"New:{baseline_data.get('new',0)} Recurring:{baseline_data.get('recurring',0)} Resolved:{baseline_data.get('resolved',0)}"
+                
+                conn.execute("""
+                INSERT INTO notification_history 
+                (scan_run_id, notification_type, sent_at, status, message_id)
+                VALUES (?, ?, ?, ?, ?)
+                """, (scan_id, notification_type, datetime.now().isoformat(), status, message_summary))
+                
+                conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.debug(f"Could not record enhanced notification: {e}")  # Non-critical

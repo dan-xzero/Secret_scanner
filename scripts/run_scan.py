@@ -1896,13 +1896,20 @@ class SecretsScanner:
                     scan_id=self.scan_id
                 )
                 self.results['html_report'] = str(report_path)
-                logger.info(f"HTML report generated: {report_path}")
-                
-                # Send Slack notifications for NEW findings only
+                logger.info(f"HTML report generated: {report_path}")                # Send Enhanced Slack notifications with baseline comparison
                 if self.slack_notifier and self.config.get('enable_slack'):
-                    new_findings = comparison_results['new']
+                    # Extract baseline comparison data
+                    baseline_comparison = {
+                        'new': len(comparison_results['new']),
+                        'recurring': len(comparison_results['recurring']),
+                        'resolved': len(comparison_results['resolved']),
+                        'false_positives': len(comparison_results['false_positives'])
+                    }
                     
-                    # Prepare summary data
+                    # Get all findings for comprehensive notification
+                    all_current_findings = comparison_results['new'] + comparison_results['recurring']
+                    
+                    # Prepare enhanced summary data with baseline information
                     summary_data = {
                         'scan_id': self.scan_id,
                         'domains_scanned': len(self.results['domains']),
@@ -1910,34 +1917,30 @@ class SecretsScanner:
                         'urls_processed': self.results['content_fetched'],
                         'urls_scanned': self.results['urls_discovered'],
                         'duration': f"{time.time() - self.start_time:.2f} seconds",
-                        'new_findings': len(new_findings),
-                        'total_findings': len(all_findings),
-                        'total_unique_secrets': len(all_findings),
-                        'new_secrets': len(new_findings),
-                        'recurring_secrets': self.results.get('recurring_secrets', 0),
-                        'resolved_secrets': self.results.get('resolved_secrets', 0),
-                        'verified_active': sum(1 for f in all_findings if f.get('verified', False))
+                        'scan_type': self.results.get('scan_type', 'full'),
+                        'baseline_comparison': baseline_comparison,
+                        'total_findings': len(all_current_findings),
+                        'findings': all_current_findings  # Include findings for detailed notification
                     }
                     
-                    if new_findings:
-                        logger.warning(f"Found {len(new_findings)} new secrets!")
+                    # Always send enhanced notification with baseline comparison
+                    if all_current_findings or baseline_comparison['resolved'] > 0:
+                        logger.info(f"Sending enhanced Slack notification with baseline comparison")
                         
-                        # Send findings notification
-                        self.slack_notifier.send_findings_notification(
-                            new_findings,
-                            notification_type='new',
-                            summary_data=summary_data
+                        # Send enhanced findings notification
+                        self.slack_notifier.send_enhanced_findings_notification_with_baseline(
+                            summary_data=summary_data,
+                            baseline_comparison=baseline_comparison
                         )
                         
-                        # Send individual alerts for critical/high severity new secrets
+                        # Send individual alerts for critical/high severity NEW secrets only
+                        new_findings = comparison_results['new']
                         for secret in new_findings:
                             severity = secret.get('severity', 'medium').lower()
                             
                             should_alert = False
-                            if severity == 'critical' and self.config.get('alert_on_critical', True):
-                                should_alert = True
-                            elif severity == 'high' and self.config.get('alert_on_high', True):
-                                should_alert = True
+                            if severity == 'critical' or severity == 'high':
+                                should_alert = self.config.get('alert_on_critical', True)
                             elif severity == 'medium' and self.config.get('alert_on_medium', False):
                                 should_alert = True
                             elif severity == 'low' and self.config.get('alert_on_low', False):
@@ -1946,12 +1949,12 @@ class SecretsScanner:
                             if should_alert and secret.get('verified'):
                                 self.slack_notifier.send_secret_alert(secret)
                     else:
-                        logger.info("No new secrets found")
+                        # No current findings and no resolved - clean scan
+                        logger.info("Clean scan - no secrets detected")
                         self.slack_notifier.send_message(
-                            f"✅ Scan {self.scan_id} completed. No new secrets found. "
-                            f"({self.results['recurring_secrets']} recurring, "
-                            f"{self.results['resolved_secrets']} resolved)",
-                            severity='info'
+                            f"✅ Clean scan completed for {self.results['domains'][0] if self.results['domains'] else 'domains'}. "
+                            f"No secrets detected in this scan.",
+                            severity='good'
                         )
             
             self._update_progress('reporting', 100, 100)
