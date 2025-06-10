@@ -129,7 +129,7 @@ security_report_*
 # Temporary Files
 *.tmp
 *.temp
-*.bak
+*.bak*
 *.swp
 *.swo
 *~
@@ -165,11 +165,13 @@ Thumbs.db
 desktop.ini
 
 # Backup Files
-*.backup
+*.backup*
 *.old
 *.orig
 *.bkp
 *.bak
+*.revert
+*.revert*
 
 # Compressed Files
 *.zip

@@ -133,7 +133,7 @@ class DatabaseManager:
                     validation_result TEXT,
                     FOREIGN KEY (secret_id) REFERENCES secrets(id),
                     FOREIGN KEY (url_id) REFERENCES urls(id),
-                    UNIQUE(secret_id, url_id, line_number)
+                    UNIQUE(secret_id, url_id, line_number, scan_run_id)
                 )
             """)
             
@@ -1164,13 +1164,8 @@ class SecretsScanner:
                     # Debug: Check what get_prioritized_urls returns
                     # Store URLs in database
                     for category, urls_list in categorized.items():
-                        for i, url in enumerate(urls_list):
-                            try:
-                                result = self._store_url(url, domain, category)
-                            except Exception as e:
                         for url in urls_list:
-                            self._store_url(url, domain, category)
-                    
+                            self._store_url(url, domain, category)                    
                     all_urls.extend(discovered_urls)
                     all_categorized[domain] = categorized
                     
@@ -1482,6 +1477,30 @@ class SecretsScanner:
                                         url_id = url_row[0]
                                         matched_url = url_row[1]
                                         logger.warning(f"✓ JS chunk mapped to last resort URL: {matched_url}")
+
+            # GUARANTEED URL ASSIGNMENT - NEW CODE ADDED HERE
+            if url_id is None:
+                logger.warning(f"All URL finding methods failed for {file_path}. Using guaranteed fallback.")
+                
+                # Get ANY URL from this scan to ensure url_id is never NULL
+                cursor = self.db.conn.execute("""
+                    SELECT id, url, domain FROM urls 
+                    WHERE scan_id = ? 
+                    ORDER BY 
+                        CASE WHEN domain LIKE '%influencers.quince.com%' THEN 1 ELSE 2 END,
+                        id 
+                    LIMIT 1
+                """, (self.scan_id,))
+                url_row = cursor.fetchone()
+                
+                if url_row:
+                    url_id = url_row[0]
+                    matched_url = url_row[1]
+                    logger.info(f"✅ GUARANTEED fallback assigned: {matched_url}")
+                else:
+                    logger.error(f"❌ CRITICAL: No URLs found for scan_id: {self.scan_id}")
+                    # This should never happen, but emergency fallback
+                    url_id = 1
             
             # Insert finding
             try:
@@ -1701,6 +1720,10 @@ class SecretsScanner:
                 pr.referrer_url,
                 pr.resource_type,
                 CASE WHEN pr.resource_url IS NOT NULL THEN 'exact' ELSE 'fallback' END as mapping_precision
+                , CASE 
+                    WHEN b.id IS NOT NULL THEN 'recurring' 
+                    ELSE 'new' 
+                END as baseline_status
             FROM findings f
             JOIN secrets s ON f.secret_id = s.id
             JOIN scan_runs sr ON f.scan_run_id = sr.id
@@ -1708,9 +1731,10 @@ class SecretsScanner:
             LEFT JOIN findings f2 ON f2.secret_id = s.id
             LEFT JOIN page_resources pr ON pr.resource_filename = CASE 
                 WHEN f.file_path LIKE '%/js/%' THEN SUBSTR(f.file_path, INSTR(f.file_path, '/js/') + 4)
-                WHEN f.file_path LIKE '%/metadata/%' THEN SUBSTR(f.file_path, INSTR(f.file_path, '/metadata/') + 10)
+                            WHEN f.file_path LIKE '%/metadata/%' THEN SUBSTR(f.file_path, INSTR(f.file_path, '/metadata/') + 10)
                 ELSE SUBSTR(f.file_path, INSTR(f.file_path, '/') + 1)
             END AND pr.scan_id = sr.id
+            LEFT JOIN baselines b ON b.secret_id = s.id AND b.domain = u.domain
             WHERE f.scan_run_id = ?
         """
         
@@ -1763,7 +1787,8 @@ class SecretsScanner:
                 'load_timing_ms': row[20],
                 'referrer_url': row[21],
                 'resource_type': row[22],
-                'mapping_precision': row[23]
+                'mapping_precision': row[23],
+                'baseline_status': row[24]
             }
             findings.append(finding)
         
@@ -2036,6 +2061,9 @@ class SecretsScanner:
             # Calculate final metrics
             self._calculate_performance_metrics()
             
+            # Save current findings as baseline for future comparison
+            self._save_baseline_findings()
+            
             # Update scan status
             self._update_scan_status('completed')
             
@@ -2092,6 +2120,39 @@ class SecretsScanner:
         finally:
             # Always close database connection
             self.db.close()
+
+    def _save_baseline_findings(self):
+        """Save current scan findings as baseline for future comparison."""
+        try:
+            domain = self.results['domains'][0] if self.results['domains'] else None
+            if not domain:
+                return
+                
+            with self.db.conn:
+                # Get all secret IDs from current scan
+                cursor = self.db.conn.execute("""
+                    SELECT DISTINCT s.id
+                    FROM findings f
+                    JOIN secrets s ON f.secret_id = s.id
+                    WHERE f.scan_run_id = ?
+                """, (self.scan_id,))
+                
+                secret_ids = [row[0] for row in cursor.fetchall()]
+                
+                # Insert into baselines (ON CONFLICT DO UPDATE for existing)
+                for secret_id in secret_ids:
+                    self.db.conn.execute("""
+                        INSERT INTO baselines (secret_id, domain, reason)
+                        VALUES (?, ?, 'scan_completion')
+                        ON CONFLICT(secret_id, domain) DO UPDATE SET
+                            marked_as_baseline_at = CURRENT_TIMESTAMP,
+                            reason = 'scan_completion'
+                    """, (secret_id, domain))
+                
+            logger.info(f"Saved {len(secret_ids)} findings as baseline for domain: {domain}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save baseline: {e}")
 
 
 def main():

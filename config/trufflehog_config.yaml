@@ -20,7 +20,7 @@ global:
   
   # Verification settings
   verify_findings: flase
-  only_verified: false
+  only_verified: true
   
   # Archive scanning
   archive_max_size: 250MB

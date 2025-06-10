@@ -444,15 +444,6 @@ class PreciseURLMapper:
                     if i < 3:  # Log first 3 for debugging
                         self.logger.debug(f"✅ Stored relationship {i}: {normalized['filename']} -> {normalized['url']}")
                     
-                except sqlite3.IntegrityError as e:
-                    # UNIQUE constraint violations are expected for baseline tracking
-                    if "UNIQUE constraint failed" in str(e):
-                        self.logger.debug(f"Secret already exists in database (baseline tracking): {e}")
-                        continue
-                    else:
-                        self.logger.error(f"Database integrity error storing finding: {e}")
-                        conn.rollback()
-                        continue
                 except sqlite3.Error as e:
                     self.logger.error(f"Database error storing resource relationship {i}: {e}")
                     error_count += 1
@@ -1442,15 +1433,6 @@ class SecretScanner:
                     # Update statistics
                     self.stats['secret_types'][normalized_finding.get('type', 'unknown')] += 1
                     
-                except sqlite3.IntegrityError as e:
-                    # UNIQUE constraint violations are expected for baseline tracking
-                    if "UNIQUE constraint failed" in str(e):
-                        self.logger.debug(f"Secret already exists in database (baseline tracking): {e}")
-                        continue
-                    else:
-                        self.logger.error(f"Database integrity error storing finding: {e}")
-                        conn.rollback()
-                        continue
                 except sqlite3.Error as e:
                     self.logger.error(f"Database error storing finding: {e}")
                     conn.rollback()

@@ -571,7 +571,7 @@ class HTMLReportGenerator:
                     'validation_results': [],
                     'highest_confidence': 'low',
                     'risk_scores': [],
-                    'baseline_status': 'unknown',
+                    'baseline_status': finding.get('baseline_status', 'unknown'),
                     
                     # ENHANCED: Precise URL mapping data
                     'precise_mapping': {
@@ -2552,7 +2552,7 @@ class HTMLReportGenerator:
                     'validation_results': [],
                     'highest_confidence': 'low',
                     'risk_scores': [],
-                    'baseline_status': 'unknown'
+                    'baseline_status': finding.get('baseline_status', 'unknown')
                 }
         
             occurrence = {

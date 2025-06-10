@@ -81,7 +81,7 @@ class DatabaseManager:
                         validation_result TEXT,
                         FOREIGN KEY (secret_id) REFERENCES secrets(id),
                         FOREIGN KEY (url_id) REFERENCES urls(id),
-                        UNIQUE(secret_id, url_id, line_number)
+                        UNIQUE(secret_id, url_id, line_number, scan_run_id)
                     )
                 """)
                 tables_created.append('findings')
