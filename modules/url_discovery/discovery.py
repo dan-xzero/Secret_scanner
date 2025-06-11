@@ -29,7 +29,7 @@ from loguru import logger
 class URLDiscovery:
     """Discovers URLs for target domains using passive reconnaissance and active crawling."""
     
-    def __init__(self, config: Dict, logger: Optional[logging.Logger] = None):
+    def __init__(self, config: Dict, logger: Optional[logging.Logger] = None, scan_id: str = None):
         """
         Initialize URL Discovery module.
         
@@ -39,6 +39,7 @@ class URLDiscovery:
         """
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
+        self.scan_id = scan_id
         
         # Passive discovery tools
         self.enable_gau = config.get('enable_gau', True)
@@ -313,6 +314,35 @@ class URLDiscovery:
         self.discovery_stats[domain]['passive_urls'] = len(passive_urls)
         self.discovery_stats[domain]['passive_duration'] = passive_duration
         
+        # Ensure main domain URL is included if accessible
+        self.logger.info(f"Checking main domain URL accessibility for {domain}")
+        main_urls_to_test = [
+            f"https://{domain}",
+            f"https://{domain}/",
+            f"https://www.{domain}",
+            f"https://www.{domain}/"
+        ]
+        
+        original_count = len(passive_urls)
+        for url in main_urls_to_test:
+            if url not in passive_urls:
+                try:
+                    import requests
+                    response = requests.head(url, timeout=10, allow_redirects=True)
+                    if response.status_code == 200:
+                        passive_urls.add(url)
+                        self.logger.info(f"✅ Added accessible main domain URL: {url}")
+                        break  # Found working main URL, stop testing
+                    else:
+                        self.logger.debug(f"Main domain URL returned {response.status_code}: {url}")
+                except Exception as e:
+                    self.logger.debug(f"Main domain URL not accessible: {url} - {e}")
+        
+        if len(passive_urls) > original_count:
+            self.logger.info(f"Enhanced URL set: +{len(passive_urls) - original_count} main domain URLs")
+        else:
+            self.logger.warning(f"⚠️ No accessible main domain URL found for {domain}")
+        
         # Phase 2: Active Crawling with Katana (thorough)
         if self.enable_katana and self._check_tool_exists('katana'):
             self.logger.info("Phase 2: Active crawling with Katana")
@@ -368,10 +398,15 @@ class URLDiscovery:
                         f"Normal: {len(categorized['normal'])}, "
                         f"Problematic: {len(categorized['problematic'])}")
         
+        # Save excluded URLs for analysis
+        if self.scan_id:
+            self.save_excluded_urls(domain)
+        
         return filtered_urls
     
     def _run_katana(self, domain: str) -> Set[str]:
         """Run Katana active crawler."""
+        self.logger.debug(f"Running Katana for {domain}")
         self.logger.debug(f"Running Katana for {domain}")
         
         urls = set()
@@ -855,6 +890,46 @@ class URLDiscovery:
             self.logger.error(f"Failed to save results: {e}")
             raise
     
+    def save_excluded_urls(self, domain: str):
+        """Save excluded URLs to a file for analysis."""
+        self.logger.info(f"🔍 DEBUG: save_excluded_urls called for domain: {domain}")
+        self.logger.info(f"🔍 DEBUG: scan_id: {self.scan_id}")
+        self.logger.info(f"🔍 DEBUG: categorized_urls keys: {list(self.categorized_urls.keys())}")
+        
+        if domain in self.categorized_urls:
+            excluded_count = len(self.categorized_urls[domain].get('excluded', []))
+            self.logger.info(f"🔍 DEBUG: excluded URLs count for {domain}: {excluded_count}")
+        else:
+            self.logger.info(f"🔍 DEBUG: domain {domain} not found in categorized_urls")
+        """Save excluded URLs to a file for analysis."""
+        if not self.scan_id or domain not in self.categorized_urls:
+            return
+        
+        try:
+            excluded_urls = self.categorized_urls[domain].get('excluded', [])
+            if not excluded_urls:
+                self.logger.debug(f"No excluded URLs to save for domain: {domain}")
+                return
+            
+            from datetime import datetime
+            output_file = f"data/skipped_urls_{self.scan_id}.txt"
+            
+            with open(output_file, 'w') as f:
+                f.write(f"# Skipped URLs Report\n")
+                f.write(f"# Scan ID: {self.scan_id}\n")
+                f.write(f"# Domain: {domain}\n")
+                f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# Total URLs excluded: {len(excluded_urls)}\n\n")
+                
+                f.write("=== EXCLUDED URLS ===\n")
+                for url in sorted(excluded_urls):
+                    f.write(f"{url}\n")
+                
+            self.logger.info(f"Excluded URLs saved to: {output_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save excluded URLs: {e}")
+
     def get_statistics(self) -> Dict:
         """Get statistics about discovered URLs."""
         stats = {

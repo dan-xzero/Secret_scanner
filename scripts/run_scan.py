@@ -999,7 +999,8 @@ class SecretsScanner:
             # URL Discovery
             self.url_discovery = URLDiscovery(
                 config=self.config,
-                logger=logger
+                logger=logger,
+                scan_id=self.scan_id
             )
             
             # Content Fetcher with database support - PASS THE DB PATH!
