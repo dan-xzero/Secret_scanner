@@ -209,7 +209,7 @@ class SlackNotifier:
                             f.file_path = pr.resource_filename 
                             AND f.scan_run_id = (
                                 SELECT sr.id FROM scan_runs sr 
-                                WHERE pr.scan_id = COALESCE(sr.scan_id, 'scan_' || sr.id)
+                                WHERE pr.scan_id = COALESCE(sr.id, 'scan_' || sr.id)
                             )
                         )
                         LEFT JOIN urls pu ON pr.parent_url_id = pu.id
@@ -261,7 +261,7 @@ class SlackNotifier:
                             f.file_path = pr.resource_filename 
                             AND f.scan_run_id = (
                                 SELECT sr.id FROM scan_runs sr 
-                                WHERE pr.scan_id = COALESCE(sr.scan_id, 'scan_' || sr.id)
+                                WHERE pr.scan_id = COALESCE(sr.id, 'scan_' || sr.id)
                             )
                         )
                         LEFT JOIN urls pu ON pr.parent_url_id = pu.id
@@ -315,7 +315,7 @@ class SlackNotifier:
                             f.file_path = pr.resource_filename 
                             AND f.scan_run_id = (
                                 SELECT sr.id FROM scan_runs sr 
-                                WHERE pr.scan_id = COALESCE(sr.scan_id, 'scan_' || sr.id)
+                                WHERE pr.scan_id = COALESCE(sr.id, 'scan_' || sr.id)
                             )
                         )
                         LEFT JOIN urls pu ON pr.parent_url_id = pu.id
@@ -961,7 +961,10 @@ class SlackNotifier:
         status_icon = self._get_status_icon(group_data['status'])
         
         # Format secret type name
-        formatted_type = secret_type.replace('_', ' ').replace('-', ' ').title()
+        formatted_type = self._format_secret_type_for_display(secret_type)
+        # DEBUG: Log secret type formatting
+        logger.debug(f"Formatting secret type: '{secret_type}' -> '{formatted_type}'")
+
         
         # Build main text with precise context
         text_lines = [
@@ -1310,10 +1313,12 @@ class SlackNotifier:
             
             for (secret_type, severity), group_data in sorted_findings:
                 emoji = self._get_severity_emoji(severity)
-                formatted_type = secret_type.replace('_', ' ').title()
-                precise_info = f"({group_data.get('precise_count', 0)} precise)"
-                blocks.append({
-                    "type": "context",
+                formatted_type = self._format_secret_type_for_display(secret_type)
+        # DEBUG: Log secret type formatting
+        logger.debug(f"Formatting secret type: '{secret_type}' -> '{formatted_type}'").title()
+        precise_info = f"({group_data.get('precise_count', 0)} precise)"
+        blocks.append({
+                "type": "context",
                     "elements": [{
                         "type": "mrkdwn",
                         "text": f"{emoji} {formatted_type}: {group_data['unique_count']} unique {precise_info}"
@@ -1388,7 +1393,10 @@ class SlackNotifier:
         status_icon = self._get_status_icon(group_data['status'])
         
         # Format secret type name
-        formatted_type = secret_type.replace('_', ' ').replace('-', ' ').title()
+        formatted_type = self._format_secret_type_for_display(secret_type)
+        # DEBUG: Log secret type formatting
+        logger.debug(f"Formatting secret type: '{secret_type}' -> '{formatted_type}'")
+
         
         # Build main text
         text_lines = [
@@ -1789,7 +1797,70 @@ class SlackNotifier:
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get notification statistics"""
-        return self.stats
+
+    def _format_secret_type_for_display(self, secret_type: str) -> str:
+        """
+        FIXED: Format secret type for display using HTML generator's logic
+        """
+        if not secret_type:
+            return "Unknown"
+        
+        # Apply same transformation as HTML generator template
+        formatted = secret_type.replace('_', ' ').replace('-', ' ').title()
+        
+        # Additional normalization for common cases
+        normalized_mapping = {
+            'Cloudflareapitoken': 'Cloudflare API Token',
+            'Genericapikey': 'Generic Api Key',
+            'Genericsecret': 'Generic Secret',
+            'Googleapikey': 'Google Api Key',
+            'Slackwebhook': 'Slack Webhook',
+            'Awsaccesskey': 'AWS Access Key',
+            'Githubtoken': 'GitHub Token'
+        }
+        
+        # Check if we need to apply additional normalization
+        normalized_key = formatted.replace(' ', '').lower()
+        for key, display_name in normalized_mapping.items():
+            if normalized_key == key.lower():
+                return display_name
+        
+        return formatted
+
+    def _get_display_url_for_finding(self, finding: Dict[str, Any]) -> str:
+        """
+        FIXED: Get the best display URL for a finding (prioritize actual JS URLs)
+        """
+        # FIXED: Prioritize actual JS file URL from precise mapping
+        if finding.get('precise_mapping', {}).get('resource_url'):
+            return finding['precise_mapping']['resource_url']
+        
+        # Fallback to main URL
+        if finding.get('url') and finding['url'] != 'Unknown':
+            return finding['url']
+        
+        # Last resort: construct from file path
+        if finding.get('file_path'):
+            file_path = finding['file_path']
+            if '/js/' in file_path:
+                # Extract filename and try to construct URL
+                filename = file_path.split('/js/')[-1]
+                if finding.get('domain'):
+                    return f"https://{finding['domain']}/js/{filename}"
+            
+
+    def _get_severity_priority(self, severity: str) -> int:
+        """
+        Get numeric priority for severity (lower number = higher priority)
+        Critical=0, High=1, Medium=2, Low=3
+        """
+        severity_map = {
+            "critical": 0,
+            "high": 1,
+            "medium": 2,
+            "low": 3
+        }
+        return severity_map.get(severity.lower(), 999)
     def send_enhanced_findings_notification_with_baseline(self, summary_data: Dict[str, Any], baseline_comparison: Dict[str, int]) -> bool:
         """
         Send detailed Slack notification with baseline comparison and enhanced formatting.
@@ -1893,19 +1964,25 @@ class SlackNotifier:
                 
                 if new_findings:
                     secrets_text = "*🔍 New Secret Details:*\n"
+                    # FIXED: Sort findings by severity (Critical > High > Medium > Low)
+                    new_findings = sorted(new_findings, key=lambda f: self._get_severity_priority(f.get("severity", "low")))
                     for i, finding in enumerate(new_findings[:6], 1):  # Show up to 6 secrets
-                        secret_type = finding.get('detector_name', finding.get('secret_type', 'Unknown'))
+                        secret_type = self._format_secret_type_for_display(finding.get('secret_type', finding.get('type', 'unknown')))
                         file_path = finding.get('file_path', finding.get('url', 'Unknown'))
                         line_num = finding.get('line_number', 'N/A')
                         severity = finding.get('severity', 'medium').title()
                         
                         # Truncate long file paths for readability
-                        display_path = file_path
-                        if len(file_path) > 45:
-                            display_path = "..." + file_path[-42:]
+                        display_path = self._get_display_url_for_finding(finding)
+                        # FIXED: Only truncate if we dont have a proper web URL
+                        if not display_path.startswith("http") and len(display_path) > 45:
+                            display_path = "..." + display_path[-42:]
+                        
+                        # Use web icon for URLs, folder icon for file paths
+                        icon = "🔗" if display_path.startswith("http") else "📁"
                         
                         secrets_text += f"`{i}.` *{secret_type}* ({severity})\n"
-                        secrets_text += f"   📁 `{display_path}:{line_num}`\n"
+                        secrets_text += f"   {icon} `{display_path}:{line_num}`\n"
                     
                     if len(new_findings) > 6:
                         secrets_text += f"   ➕ ...and {len(new_findings) - 6} more new secrets\n"
