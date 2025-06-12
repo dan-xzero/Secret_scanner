@@ -2126,37 +2126,55 @@ class SecretsScanner:
             self.db.close()
 
     def _save_baseline_findings(self):
-        """Save current scan findings as baseline for future comparison."""
+        """Save current scan findings as baseline for future comparison - FIXED for multi-domain."""
         try:
-            domain = self.results['domains'][0] if self.results['domains'] else None
-            if not domain:
+            domains = self.results.get('domains', [])
+            if not domains:
+                logger.warning("No domains found in results for baseline creation")
                 return
                 
-            with self.db.conn:
-                # Get all secret IDs from current scan
-                cursor = self.db.conn.execute("""
-                    SELECT DISTINCT s.id
-                    FROM findings f
-                    JOIN secrets s ON f.secret_id = s.id
-                    WHERE f.scan_run_id = ?
-                """, (self.scan_id,))
-                
-                secret_ids = [row[0] for row in cursor.fetchall()]
-                
-                # Insert into baselines (ON CONFLICT DO UPDATE for existing)
-                for secret_id in secret_ids:
-                    self.db.conn.execute("""
-                        INSERT INTO baselines (secret_id, domain, reason)
-                        VALUES (?, ?, 'scan_completion')
-                        ON CONFLICT(secret_id, domain) DO UPDATE SET
-                            marked_as_baseline_at = CURRENT_TIMESTAMP,
-                            reason = 'scan_completion'
-                    """, (secret_id, domain))
-                
-            logger.info(f"Saved {len(secret_ids)} findings as baseline for domain: {domain}")
+            total_baselines_created = 0
+            
+            # Process each domain individually
+            for domain in domains:
+                try:
+                    with self.db.conn:
+                        # Get secret IDs for this specific domain
+                        cursor = self.db.conn.execute("""
+                            SELECT DISTINCT s.id
+                            FROM findings f
+                            JOIN secrets s ON f.secret_id = s.id
+                            JOIN urls u ON f.url_id = u.id
+                            WHERE f.scan_run_id = ? AND u.domain = ?
+                        """, (self.scan_id, domain))
+                        
+                        secret_ids = [row[0] for row in cursor.fetchall()]
+                        
+                        if not secret_ids:
+                            logger.debug(f"No findings to baseline for domain: {domain}")
+                            continue
+                        
+                        # Insert into baselines for this specific domain
+                        for secret_id in secret_ids:
+                            self.db.conn.execute("""
+                                INSERT INTO baselines (secret_id, domain, reason)
+                                VALUES (?, ?, 'scan_completion')
+                                ON CONFLICT(secret_id, domain) DO UPDATE SET
+                                    marked_as_baseline_at = CURRENT_TIMESTAMP,
+                                    reason = 'scan_completion'
+                            """, (secret_id, domain))
+                        
+                        total_baselines_created += len(secret_ids)
+                        logger.info(f"Saved {len(secret_ids)} findings as baseline for domain: {domain}")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to save baseline for domain {domain}: {e}")
+                    continue
+            
+            logger.info(f"Baseline creation completed. Total baselines created/updated: {total_baselines_created}")
             
         except Exception as e:
-            logger.error(f"Failed to save baseline: {e}")
+            logger.error(f"Failed to save baselines: {e}")
 
 
 def main():
