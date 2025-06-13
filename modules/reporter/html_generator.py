@@ -2517,10 +2517,10 @@ class HTMLReportGenerator:
     def _save_report(self, html_content: str, report_type: str, scan_id: Optional[str] = None) -> Path:
         """Save HTML report to file"""
         if scan_id:
-            filename = f"{scan_id}_{report_type}_enhanced_precise_report.html"
+            filename = f"{scan_id}_{report_type}_report.html"
         else:
             timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            filename = f"enhanced_precise_secrets_report_{report_type}_{timestamp}.html"
+            filename = f"report_{report_type}_{timestamp}.html"
         
         report_file = self.reports_path / filename
         
