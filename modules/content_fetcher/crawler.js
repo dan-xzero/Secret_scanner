@@ -554,10 +554,28 @@ async function saveUrlMappings(outputDir) {
   const resourceMappingsPath = path.join(outputDir, 'resource_relationships.json');
   
   try {
-    // Save complete mappings
+    // FIXED: Load existing mappings and merge instead of overwriting
+    let existingMappings = { fileToUrl: {}, urlToFile: {}, metadata: {} };
+    
+    try {
+      const existingData = await fs.readFile(mappingPath, 'utf-8');
+      existingMappings = JSON.parse(existingData);
+    } catch (err) {
+      // File doesn't exist yet or invalid JSON - use empty structure
+      console.log('No existing mappings found, creating new file');
+    }
+    
+    // Merge current batch mappings with existing mappings
+    const mergedMappings = {
+      fileToUrl: { ...existingMappings.fileToUrl, ...urlMappings.fileToUrl },
+      urlToFile: { ...existingMappings.urlToFile, ...urlMappings.urlToFile },
+      metadata: { ...existingMappings.metadata, ...urlMappings.metadata }
+    };
+    
+    // Save merged mappings
     await fs.writeFile(
       mappingPath, 
-      JSON.stringify(urlMappings, null, 2), 
+      JSON.stringify(mergedMappings, null, 2), 
       'utf-8'
     );
     

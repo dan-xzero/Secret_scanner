@@ -284,85 +284,114 @@ class PreciseURLMapper:
         self._load_resource_relationships()
     
     def _load_resource_relationships(self):
-        """Load resource relationships from crawler output and database."""
+        """Load resource relationships from file_to_url_mappings.json (FIXED)."""
         self.logger.debug(f"🔍 _load_resource_relationships called")
         self.logger.debug(f"🔍 scan_id: {self.scan_id}")
         
         try:
-            # Load from resource_relationships.json if available
+            # FIXED: Load from the correct file - file_to_url_mappings.json
             data_path = Path(f"./data/content/{self.scan_id}")
-            resource_file = data_path / "resource_relationships.json"
+            mapping_file = data_path / "url_mappings.json"  # ← USE COMPREHENSIVE MAPPING
             
-            self.logger.debug(f"🔍 Looking for file: {resource_file}")
-            self.logger.debug(f"🔍 File exists: {resource_file.exists()}")
+            self.logger.debug(f"🔍 Looking for file: {mapping_file}")
+            self.logger.debug(f"🔍 File exists: {mapping_file.exists()}")
             
-            if resource_file.exists():
+            if mapping_file.exists():
                 # Check file size
-                file_size = resource_file.stat().st_size
+                file_size = mapping_file.stat().st_size
                 self.logger.debug(f"🔍 File size: {file_size} bytes")
                 
-                with open(resource_file, 'r') as f:
+                with open(mapping_file, 'r') as f:
                     data = json.load(f)
                     
                 self.logger.debug(f"🔍 JSON loaded successfully, type: {type(data)}")
+                self.logger.debug(f"🔍 Raw data loaded: {len(data)}")
                 
-                raw_relationships = data.get('relationships', [])
-                self.logger.debug(f"🔍 Raw relationships extracted: {len(raw_relationships)} items")
+                # Convert file mappings to resource relationships format
+                # Process the comprehensive fileToUrl mappings
+                file_to_url_data = data.get("fileToUrl", {})
+                self.logger.debug(f"🔍 Loaded {len(file_to_url_data)} comprehensive mappings")
                 
-                # Validate each relationship
-                validated_relationships = []
-                validation_errors = 0
-                
-                for i, rel in enumerate(raw_relationships):
-                    is_valid, error_msg, normalized = DataValidator.validate_resource_relationship(rel)
-                    if is_valid:
-                        validated_relationships.append(normalized)
-                    else:
-                        validation_errors += 1
-                        if validation_errors <= 3:  # Log first 3 errors only
-                            self.logger.debug(f"🔍 Validation failed for item {i}: {error_msg}")
-                            
-                self.logger.debug(f"🔍 Validation complete: {len(validated_relationships)} valid, {validation_errors} invalid")
-                
-                # THIS IS THE CRITICAL LINE - check if it's actually setting the array
-                self.resource_relationships = validated_relationships
-                self.logger.debug(f"🔍 Set self.resource_relationships to {len(self.resource_relationships)} items")
-                
-                # Verify the array is actually set
-                if hasattr(self, 'resource_relationships'):
-                    self.logger.debug(f"🔍 Confirmed: self.resource_relationships has {len(self.resource_relationships)} items")
+                for file_path, mapping_info in file_to_url_data.items():
+                    # Extract URL from the comprehensive mapping structure
+                    url = mapping_info.get("url")
+                    parent_url = mapping_info.get("parentUrl")
+                    # Extract filename from path
+                    filename = os.path.basename(file_path)
                     
-                    # Show first relationship for verification
-                    if self.resource_relationships:
-                        first_rel = self.resource_relationships[0]
-                        self.logger.debug(f"🔍 First relationship filename: {first_rel.get('filename', 'NO_FILENAME')}")
-                else:
-                    self.logger.debug(f"❌ self.resource_relationships not set!")
+                    # Determine resource type and load method
+                    resource_type = 'script' if file_path.endswith('.js') else 'document'
+                    load_method = 'inline' if 'inline-scripts' in file_path else 'static'
                     
-                self.logger.info(f"Loaded {len(self.resource_relationships)} valid resource relationships from crawler")
+                    # Create resource relationship object
+                    resource_rel = {
+                        'filename': filename,
+                        'full_path': file_path,
+                        'url': url,
+                        'parentUrl': url.split('#')[0] if '#' in url else url,
+                        'resourceType': resource_type,
+                        'loadMethod': load_method,
+                        'loadTime': 0,
+                        'timestamp': None,
+                        'source': 'file_mapping'
+                    }
+                    
+                    self.resource_relationships.append(resource_rel)
+                    
+                    # Add to cache with multiple lookup keys for flexibility
+                    self.resource_cache[filename] = resource_rel
+                    self.resource_cache[file_path] = resource_rel
+                    
+                    # Also cache with variations for better matching
+                    if '/' in file_path:
+                        # Cache by basename for easier lookup
+                        self.resource_cache[os.path.basename(file_path)] = resource_rel
+                    
+                    # For inline scripts, cache additional patterns
+                    if 'inline-scripts' in file_path and filename.endswith('.js'):
+                        # Cache the HTML parent reference
+                        html_name = filename.replace('.js', '').split('_inline_')[0] + '.html'
+                        if html_name not in self.resource_cache:
+                            # Create a reference to the parent page
+                            parent_rel = resource_rel.copy()
+                            parent_rel['filename'] = html_name
+                            parent_rel['url'] = url.split('#')[0]  # Remove fragment
+                            self.resource_cache[html_name] = parent_rel
+                    
+                self.logger.info(f"✅ Loaded {len(file_to_url_data)} precise file-to-URL mappings")
                 
             else:
-                self.logger.debug(f"🔍 File not found: {resource_file}")
-                # Initialize empty array if file doesn't exist
-                self.resource_relationships = []
+                self.logger.warning(f"❌ File mapping file not found: {mapping_file}")
                 
-            # Store relationships in database for future use
-            self.logger.debug(f"🔍 About to call _store_resource_relationships")
-            self._store_resource_relationships()
-            self.logger.debug(f"🔍 _store_resource_relationships completed")
-            
-            # Final verification
-            self.logger.debug(f"🔍 Final array length: {len(getattr(self, 'resource_relationships', []))}")
-            
-        except json.JSONDecodeError as e:
-            self.logger.error(f"❌ JSON decode error: {e}")
-            self.resource_relationships = []
+            # Also try to load from resource_relationships.json if it exists (keep existing logic)
+            resource_file = data_path / "resource_relationships.json"
+            if resource_file.exists():
+                self.logger.debug(f"🔍 Also loading from: {resource_file}")
+                with open(resource_file, 'r') as f:
+                    resource_data = json.load(f)
+                
+                # Process resource_relationships.json if it exists
+                if isinstance(resource_data, list):
+                    for item in resource_data:
+                        is_valid, error_msg, normalized = self._validate_and_normalize_resource_relationship(item)
+                        if is_valid and normalized:
+                            self.resource_relationships.append(normalized)
+                            if normalized.get('filename'):
+                                self.resource_cache[normalized['filename']] = normalized
+                                
+                self.logger.info(f"✅ Also loaded {len(resource_data) if isinstance(resource_data, list) else 0} resource relationships")
+                
         except Exception as e:
             self.logger.error(f"❌ Exception in _load_resource_relationships: {e}")
             self.logger.debug(f"❌ Exception type: {type(e).__name__}")
             import traceback
             self.logger.debug(f"❌ Traceback: {traceback.format_exc()}")
             self.resource_relationships = []
+            self.resource_cache = {}
+
+    def _validate_and_normalize_resource_relationship(self, rel: Dict) -> Tuple[bool, str, Dict]:
+        """Validate and normalize resource relationship data."""
+        return DataValidator.validate_resource_relationship(rel)
     
     def _store_resource_relationships(self):
         """Store resource relationships in page_resources table with enhanced error handling."""
@@ -535,133 +564,156 @@ class PreciseURLMapper:
         return None
     
     def get_precise_url_for_file(self, filename: str) -> Optional[Dict]:
-        """Enhanced debug version to identify the exact issue"""
-        
-        # 🔍 STEP 1: Log method entry and parameters
-        self.logger.debug(f"🔍 METHOD CALLED with filename: '{filename}' (len={len(filename)})")
-        self.logger.debug(f"🔍 Filename repr: {repr(filename)}")
-        self.logger.debug(f"🔍 Array length: {len(self.resource_relationships)}")
-        
-        # 🔍 STEP 2: Check if array is actually populated
-        if not self.resource_relationships:
-            self.logger.debug(f"❌ resource_relationships array is EMPTY!")
+        """Get precise URL mapping for a file with comprehensive matching - FULLY FIXED."""
+        if not filename:
             return None
             
-        # 🔍 STEP 3: Log first few entries for comparison
-        self.logger.debug(f"🔍 First 3 filenames in array:")
-        for i, rel in enumerate(self.resource_relationships[:3]):
-            stored_filename = rel.get('filename', 'NO_FILENAME_KEY')
-            self.logger.debug(f"   [{i}]: '{stored_filename}' (len={len(stored_filename)})")
-            self.logger.debug(f"   [{i}]: repr: {repr(stored_filename)}")
+        self.logger.debug(f"🔍 Looking up precise mapping for: '{filename}'")
         
-        # Method 1: Check in-memory resource relationships from crawler
-        self.logger.debug(f"🔍 Starting Method 1: In-memory search...")
-        exact_matches = []
-        partial_matches = []
+        # Ensure stats tracking exists
+        if not hasattr(self, 'stats'):
+            self.stats = {'precise_mappings_used': 0, 'fallback_mappings_used': 0}
+        if 'precise_mappings_used' not in self.stats:
+            self.stats['precise_mappings_used'] = 0
+        if 'fallback_mappings_used' not in self.stats:
+            self.stats['fallback_mappings_used'] = 0
         
-        for i, rel in enumerate(self.resource_relationships):
-            stored_filename = rel.get('filename')
-            if not stored_filename:
-                continue
-                
-            # 🔍 STEP 4: Detailed comparison logging
-            if i < 5:  # Log first 5 for detailed analysis
-                self.logger.debug(f"🔍 Comparing [{i}]:")
-                self.logger.debug(f"   Target: '{filename}'")
-                self.logger.debug(f"   Stored: '{stored_filename}'")
-                self.logger.debug(f"   Equal: {stored_filename == filename}")
-                self.logger.debug(f"   Target in Stored: {filename in stored_filename}")
-                self.logger.debug(f"   Stored in Target: {stored_filename in filename}")
+        # Method 1: Direct cache lookup (exact match)
+        if filename in self.resource_cache:
+            self.stats['precise_mappings_used'] += 1
+            rel = self.resource_cache[filename]
+            self.logger.debug(f"✅ Direct cache hit for: {filename}")
+            return self._format_precise_mapping(rel)
+        
+        # Method 2: Try filename variations for better matching
+        variations = [
+            filename,
+            os.path.basename(filename),
+            f"inline-scripts/{filename}",
+            f"html/{filename}",
+            f"js/{filename}",
+            f"json/{filename}",
+            f"other/{filename}",
+        ]
+        
+        # For files with directory prefixes, try without prefix
+        if '/' in filename:
+            base_name = os.path.basename(filename)
+            variations.append(base_name)
             
-            # Exact match
-            if stored_filename == filename:
-                exact_matches.append((i, rel))
-                self.logger.debug(f"✅ EXACT MATCH FOUND at index {i}")
-                
-            # Partial matches for debugging
-            elif filename in stored_filename or stored_filename in filename:
-                partial_matches.append((i, rel, stored_filename))
-        
-        # 🔍 STEP 5: Report findings
-        self.logger.debug(f"🔍 Method 1 Results:")
-        self.logger.debug(f"   Exact matches: {len(exact_matches)}")
-        self.logger.debug(f"   Partial matches: {len(partial_matches)}")
-        
-        if exact_matches:
-            # Return first exact match
-            _, rel = exact_matches[0]
+        # For inline scripts, try different patterns
+        if '_inline_' in filename and filename.endswith('.js'):
+            # Try the base HTML file mapping
+            html_name = filename.replace('.js', '').split('_inline_')[0] + '.html'
+            variations.extend([
+                html_name,
+                f"html/{html_name}",
+                f"inline-scripts/{html_name}",
+            ])
             
-            # 🔢 FORCE COUNTER INCREMENT - ensure stats exist
-            if not hasattr(self, "stats"):
-                self.stats = {"precise_mappings_used": 0}
-            if "precise_mappings_used" not in self.stats:
-                self.stats["precise_mappings_used"] = 0
-                
-            self.stats["precise_mappings_used"] += 1
-            self.logger.debug(f"🔢 COUNTER INCREMENTED to {self.stats['precise_mappings_used']}")
+            # Also try the parent page URL pattern
+            parent_pattern = filename.split('_inline_')[0] + '.html'
+            variations.append(f"html/{parent_pattern}")
+        
+        # Try each variation
+        for variation in variations:
+            if variation in self.resource_cache:
+                self.stats['precise_mappings_used'] += 1
+                rel = self.resource_cache[variation]
+                self.logger.debug(f"✅ Cache hit with variation '{variation}' for: {filename}")
+                return self._format_precise_mapping(rel)
+        
+        # Method 3: Fuzzy matching through all relationships
+        for rel in self.resource_relationships:
+            rel_filename = rel.get('filename', '')
+            rel_path = rel.get('full_path', '')
             
-            self.logger.debug(f"✅ RETURNING exact match: {rel}")
-            return {
-            'url': rel.get('url'),              # ✅ FIX: Use actual JS URL
-            'resource_url': rel.get('url'),     # Keep this too
-            'parent_url': rel.get('parentUrl'), # Move parent URL here
+            # Check various matching patterns
+            matches = [
+                rel_filename == filename,
+                rel_path == filename,
+                rel_path.endswith(filename),
+                filename.endswith(rel_filename) if rel_filename else False,
+                rel_filename in filename if rel_filename else False,
+                filename in rel_filename if rel_filename else False,
+                rel_path.endswith(f"/{filename}") if rel_path else False,
+            ]
+            
+            if any(matches):
+                self.stats['precise_mappings_used'] += 1
+                self.logger.debug(f"✅ Fuzzy match found for: {filename} -> {rel_filename}")
+                return self._format_precise_mapping(rel)
+        
+        # Method 4: Database lookup (if available)
+        if self.db:
+            try:
+                conn = self.db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT u.url as parent_url, pr.resource_url, pr.load_method,
+                           pr.load_timing_ms, pr.referrer_url, pr.first_seen
+                    FROM page_resources pr
+                    JOIN urls u ON pr.parent_url_id = u.id
+                    WHERE pr.resource_filename = ? AND pr.scan_id = ?
+                    ORDER BY pr.first_seen DESC LIMIT 1
+                """, (filename, self.scan_id))
+                
+                result = cursor.fetchone()
+                if result:
+                    self.stats['precise_mappings_used'] += 1
+                    self.logger.debug(f"✅ Database hit for: {filename}")
+                    return {
+                        'url': result[1] or result[0],  # Prefer resource_url
+                        'resource_url': result[1],
+                        'parent_url': result[0],
+                        'load_method': result[2],
+                        'load_timing_ms': result[3],
+                        'referrer_url': result[4],
+                        'first_seen': result[5],
+                        'precision': 'exact',
+                        'source': 'database'
+                    }
+                    
+            except Exception as e:
+                self.logger.debug(f"❌ Database lookup failed for {filename}: {e}")
+        
+        # Method 5: Final fallback - increment fallback counter
+        self.stats['fallback_mappings_used'] += 1
+        self.logger.debug(f"❌ No precise mapping found for: '{filename}' (checked {len(self.resource_relationships)} relationships)")
+        
+        return None
+
+    def _format_precise_mapping(self, rel: Dict) -> Dict:
+        """Format a resource relationship into the expected precise mapping format - FIXED."""
+        return {
+            'url': rel.get('url'),
+            'resource_url': rel.get('url'),
+            'parent_url': rel.get('parentUrl'),
             'load_method': rel.get('loadMethod'),
             'load_timing_ms': rel.get('loadTime', 0),
             'referrer_url': rel.get('parentUrl'),
             'first_seen': rel.get('timestamp'),
             'precision': 'exact',
-            'source': 'memory'
+            'source': rel.get('source', 'memory')
         }
+
+    def get_mapping_statistics(self) -> Dict:
+        """Get comprehensive mapping statistics."""
+        if not hasattr(self, 'stats'):
+            return {}
+            
+        total_lookups = self.stats.get('precise_mappings_used', 0) + self.stats.get('fallback_mappings_used', 0)
+        precision_rate = (self.stats.get('precise_mappings_used', 0) / max(total_lookups, 1)) * 100
         
-        # 🔍 STEP 6: Log partial matches for analysis
-        if partial_matches:
-            self.logger.debug(f"🔍 Found {len(partial_matches)} partial matches:")
-            for i, (idx, rel, stored_name) in enumerate(partial_matches[:3]):
-                self.logger.debug(f"   Partial[{i}]: '{stored_name}' at index {idx}")
-        
-        # Method 2: Query database for stored relationships
-        self.logger.debug(f"🔍 Starting Method 2: Database search...")
-        if self.db:
-            try:
-                with self.db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        SELECT u.url as parent_url, pr.resource_url, pr.load_method,
-                            pr.load_timing_ms, pr.referrer_url, pr.first_seen
-                        FROM page_resources pr
-                        JOIN urls u ON pr.parent_url_id = u.id
-                        WHERE pr.resource_filename = ? AND pr.scan_id = ?
-                        ORDER BY pr.first_seen DESC LIMIT 1
-                    """, (filename, self.scan_id))
-                    
-                    result = cursor.fetchone()
-                    if result:
-                        self.logger.debug(f"✅ Found precise mapping in database for {filename}")
-                        return {
-                            'url': result[0],
-                            'resource_url': result[1],
-                            'load_method': result[2],
-                            'load_timing_ms': result[3],
-                            'referrer_url': result[4],
-                            'first_seen': result[5],
-                            'precision': 'exact',
-                            'source': 'database'
-                        }
-                    else:
-                        self.logger.debug(f"❌ No database record found for filename: '{filename}'")
-                        
-            except Exception as e:
-                self.logger.debug(f"❌ Database lookup failed for {filename}: {e}")
-        else:
-            self.logger.debug(f"❌ No database connection available")
-        
-        # 🔍 STEP 7: Final failure analysis
-        self.logger.debug(f"❌ NO PRECISE MAPPING FOUND for '{filename}'")
-        self.logger.debug(f"❌ Checked {len(self.resource_relationships)} relationships")
-        self.logger.debug(f"❌ Target filename: {repr(filename)}")
-        
-        return None
-    
+        return {
+            'total_lookups': total_lookups,
+            'precise_mappings': self.stats.get('precise_mappings_used', 0),
+            'fallback_mappings': self.stats.get('fallback_mappings_used', 0),
+            'precision_rate': f"{precision_rate:.1f}%",
+            'relationships_loaded': len(getattr(self, 'resource_relationships', [])),
+            'cache_entries': len(getattr(self, 'resource_cache', {}))
+        }
+
     def store_js_chunk_metadata(self, filename: str, parent_url: str, metadata: Dict):
         """Store JavaScript chunk metadata in database."""
         if not self.db:
@@ -679,15 +731,15 @@ class PreciseURLMapper:
             
             # Validate metadata
             safe_metadata = {
-            'hash': str(metadata.get('hash', '')),
-            'webpack_chunk_id': str(metadata.get('webpack_chunk_id', '')),
-            'source_map_url': str(metadata.get('source_map_url', '')),
-            'entry_point': bool(metadata.get('entry_point', False)),
-            'size': int(metadata.get('size', 0)) if isinstance(metadata.get('size'), (int, float)) else 0,
-            'load_order': int(metadata.get('load_order', 0)) if isinstance(metadata.get('load_order'), (int, float)) else 0,
-            'dependencies': metadata.get('dependencies', []),
-            'load_context': metadata.get('load_context', {})
-        }
+                'hash': str(metadata.get('hash', '')),
+                'webpack_chunk_id': str(metadata.get('webpack_chunk_id', '')),
+                'source_map_url': str(metadata.get('source_map_url', '')),
+                'entry_point': bool(metadata.get('entry_point', False)),
+                'size': int(metadata.get('size', 0)) if isinstance(metadata.get('size'), (int, float)) else 0,
+                'load_order': int(metadata.get('load_order', 0)) if isinstance(metadata.get('load_order'), (int, float)) else 0,
+                'dependencies': metadata.get('dependencies', []),
+                'load_context': metadata.get('load_context', {})
+            }
             
             # Insert chunk metadata
             cursor.execute("""
@@ -737,7 +789,6 @@ class SecretScanner:
         self.enable_trufflehog = config.get('enable_trufflehog', True)
         self.enable_gitleaks = config.get('enable_gitleaks', True)
         self.enable_custom_patterns = config.get('enable_custom_patterns', True)
-
             
         # Configuration paths
         self.trufflehog_config = config.get('trufflehog_config_path')
@@ -1242,12 +1293,19 @@ class SecretScanner:
         # Update scan statistics in database
         self._update_scan_statistics()
         
-        # Log mapping statistics
+        # Log comprehensive mapping statistics
         if self.precise_url_mapper:
-            self.logger.info(
-                f"URL Mapping: {self.stats['precise_mappings_used']} precise, "
-                f"{self.stats['fallback_mappings_used']} fallback"
-            )
+            mapping_stats = self.precise_url_mapper.get_mapping_statistics()
+            self.logger.info("✅ Precision Mapping Results:")
+            self.logger.info(f"   Total lookups: {mapping_stats.get('total_lookups', 0)}")
+            self.logger.info(f"   Precise mappings: {mapping_stats.get('precise_mappings', 0)} ({mapping_stats.get('precision_rate', '0%')})")
+            self.logger.info(f"   Fallback mappings: {mapping_stats.get('fallback_mappings', 0)}")
+            self.logger.info(f"   Relationships loaded: {mapping_stats.get('relationships_loaded', 0)}")
+            self.logger.info(f"   Cache entries: {mapping_stats.get('cache_entries', 0)}")
+            
+            # Update scanner stats
+            self.stats['precise_mappings_used'] = mapping_stats.get('precise_mappings', 0)
+            self.stats['fallback_mappings_used'] = mapping_stats.get('fallback_mappings', 0)
         
         self.logger.info(
             f"Scan completed in {self.stats['scan_duration']:.2f}s. "

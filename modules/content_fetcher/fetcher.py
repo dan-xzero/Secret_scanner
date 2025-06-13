@@ -280,7 +280,9 @@ class ContentFetcher:
                     '''
                     rows = conn.execute(query).fetchall()
                 
-                self.url_filename_map = {}
+                # FIXED: Only initialize if empty, don't reset existing mappings from other batches
+                if not hasattr(self, 'url_filename_map'):
+                    self.url_filename_map = {}
                 for row in rows:
                     if row[1]:  # If filename exists
                         # Extract just the filename if it's a full path
@@ -314,7 +316,16 @@ class ContentFetcher:
         self._progress['status'] = 'fetching'
         
         # Initialize URL mappings BEFORE trying to load from DB
-        self.url_filename_map = self._initialize_url_mappings(urls, scan_id)
+        # FIXED: Accumulate mappings instead of overwriting for multi-domain scans
+        if not hasattr(self, 'url_filename_map') or not self.url_filename_map:
+            # First batch - initialize
+            self.url_filename_map = self._initialize_url_mappings(urls, scan_id)
+            self.logger.debug(f"Initialized URL mappings for {len(urls)} URLs")
+        else:
+            # Subsequent batches - accumulate
+            new_mappings = self._initialize_url_mappings(urls, scan_id)
+            self.url_filename_map.update(new_mappings)
+            self.logger.debug(f"Accumulated {len(new_mappings)} new mappings, total: {len(self.url_filename_map)} URLs")
         if scan_id:
             self.scan_run_id = scan_id
         

@@ -586,14 +586,24 @@ class HTMLReportGenerator:
             
             # Enhanced occurrence with precise mapping
             # Create precise_mapping from top-level SQL data
+            # Get correct data from validation_result.url_context
+            validation_result = finding.get('validation_result', {})
+            if isinstance(validation_result, str):
+                import json
+                try:
+                    validation_result = json.loads(validation_result)
+                except:
+                    validation_result = {}
+            
+            url_context = validation_result.get('url_context', {})
             precise_mapping = {
-                'precision_level': finding.get('mapping_precision', 'fallback'),
-                'parent_page_url': finding.get('referrer_url') or finding.get('url', 'Unknown'),
-                'resource_url': finding.get('precise_resource_url'),
-                'load_method': finding.get('load_method'),
-                'load_timing_ms': finding.get('load_timing_ms'),
-                'referrer_url': finding.get('referrer_url'),
-                'resource_type': finding.get('resource_type')
+                'precision_level': url_context.get('precision_level', 'fallback'),
+                'parent_page_url': url_context.get('referrer_url', finding.get('url', 'Unknown')),
+                'resource_url': url_context.get('resource_url'),
+                'load_method': url_context.get('load_method'),
+                'load_timing_ms': url_context.get('load_timing_ms'),
+                'referrer_url': url_context.get('referrer_url'),
+                'resource_type': url_context.get('resource_type')
             }
             occurrence = {
                 'id': finding.get('id', ''),
